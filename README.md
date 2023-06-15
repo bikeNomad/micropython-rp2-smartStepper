@@ -1,6 +1,6 @@
 # Micropython lib
 
-My collection of Micropython libs, based on existing libs, or entirely written by me.
+My collection of Micropython libs, based on existing libs, or entirely written from scratch.
 
 (C) 2023 Frédéric Mantegazza
 
@@ -34,7 +34,17 @@ Simple servo driving lib.
 
 ### uGEM
 
+Micropython port of Arduino GEM lib by ???.
+
 _Work in progress_
+
+### baos
+
+BAOS KNX ??? board handling. Based on original C code from ???.
+
+### sht15
+
+SHT15 sensor reader.
 
 ## RaspberryPi Pico dedicated libs
 
