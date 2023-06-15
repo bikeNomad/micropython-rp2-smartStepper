@@ -56,4 +56,4 @@ SSI encoder reading.
 
 ## Pyboard dedicated libs
 
-These libs require a Pyboatd (v1.0 or v1.1) because they use the original LCD/touch shield.
+These libs require a Pyboard (v1.0 or v1.1) because they use the original LCD/touch shield.
