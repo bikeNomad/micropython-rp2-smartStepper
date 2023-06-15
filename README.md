@@ -1,3 +1,49 @@
 # Micropython lib
 
+My collection of Micropython libs, based on existing libs, or entirely written by me.
+
 (C) 2023 Frédéric Mantegazza
+
+## General libs
+
+### smartStepper
+
+Stepper controller. Handle acceleration in both goto and jog modes.
+
+### smartButton
+
+Manage debouncing, click, double-click, long press...
+
+### pidController
+
+Simple PID controller.
+
+### response
+
+Time-based curve generator. Mainly used by the smartStepper lib to generate acceleration curve.
+
+### servo
+
+Simple servo driving lib.
+
+### signal
+
+### umenu2
+
+µ-menu library based on xxx's umenu lib.
+
+### uGEM
+
+_Work in progress_
+
+## RaspberryPi Pico dedicated libs
+
+These libs require a RPi Pico as they use PIOs.
+
+### ssi
+
+SSI encoder reading.
+
+## Pyboard dedicated libs
+
+These libs require a Pyboatd (v1.0 or v1.1) because they use the original LCD/touch shield.
