@@ -4,8 +4,6 @@ My collection of Micropython libs, based on existing libs, or entirely written f
 
 Also contains untouched libs from other people.
 
-(C) 2023 Frédéric Mantegazza
-
 ## My own libs
 
 ### baos
