@@ -46,7 +46,7 @@ Manage debouncing, click, double-click, long press...
 
 Stepper controller. Handle acceleration in both goto and jog modes.
 
-### ssi (for RPi pico only)
+### ssi (RPi pico)
 
 SSI encoder reading.
 
@@ -74,7 +74,7 @@ DMA management.
 
 Simple logging system.
 
-## rotary (for RPi Pico, Pyboard and Esp)
+## rotary (RPi Pico, Pyboard, Esp)
 
 Quadrature encoder handling.
 
