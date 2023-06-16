@@ -1,36 +1,55 @@
 # Micropython lib
 
 My collection of Micropython libs, based on existing libs, or entirely written from scratch.
+Also contains untouched libs from other people.
 
 (C) 2023 Frédéric Mantegazza
 
-## General libs
+## My own libs
 
-### smartStepper
+### baos
 
-Stepper controller. Handle acceleration in both goto and jog modes.
+BAOS KNX ??? board handling. Based on original C code from ???.
 
-### smartButton
+### fsm
 
-Manage debouncing, click, double-click, long press...
+Finite State Machine.
 
 ### pidController
 
 Simple PID controller.
 
+## pys2x
+
+PS2 gamepad python support.
+
 ### response
 
-Time-based curve generator. Mainly used by the smartStepper lib to generate acceleration curve.
+Time-based curve generator (used by SmartStepper class to generate acceleration curve).
 
 ### servo
 
 Simple servo driving lib.
 
+### sht15
+
+SHT15 sensor reader.
+
 ### signal
 
-### umenu2
+Signal/slot management.
 
-µ-menu library based on xxx's umenu lib.
+### smartButton
+
+Manage debouncing, click, double-click, long press...
+
+### smartStepper
+
+Stepper controller. Handle acceleration in both goto and jog modes.
+
+### ssi (for RPi pico only)
+
+SSI encoder reading.
 
 ### uGEM
 
@@ -38,26 +57,32 @@ Micropython port of Arduino GEM lib by ???.
 
 _Work in progress_
 
-### baos
+### umenu2
 
-BAOS KNX ??? board handling. Based on original C code from ???.
+µ-menu library based on xxx's umenu lib.
 
-### sht15
+## Untouched libs from other people
 
-SHT15 sensor reader.
+## configParser
 
-### fsm
+Simple config parser.
 
-Finite State Machine
+## dma
 
-## RaspberryPi Pico dedicated libs
+DMA management.
 
-These libs require a RPi Pico as they use PIOs.
+## logging
 
-### ssi
+Simple logging system.
 
-SSI encoder reading.
+## rotary (for RPi Pico, Pyboard and Esp)
 
-## pyboard dedicated libs
+Quadrature encoder handling.
 
-These libs require a pyboard (v1.0 or v1.1) because they use the original LCD/touch shield.
+## ssd1306
+
+SSD1306-based OLED displays driver.
+
+## umidiparser
+
+MIDI file parser.
