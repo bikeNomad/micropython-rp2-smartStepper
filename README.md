@@ -46,6 +46,10 @@ BAOS KNX ??? board handling. Based on original C code from ???.
 
 SHT15 sensor reader.
 
+### fsm
+
+Finite State Machine
+
 ## RaspberryPi Pico dedicated libs
 
 These libs require a RPi Pico as they use PIOs.
