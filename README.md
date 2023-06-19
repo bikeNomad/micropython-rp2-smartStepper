@@ -8,7 +8,7 @@ Also contains untouched libs from other people.
 
 ### baos
 
-BAOS KNX ??? board handling. Based on original C code from ???.
+**KNX Tiny Serial 810 “UART”** board handling. Based on original C code from Weinzierl Engineering GmbH.
 
 ### fsm
 
