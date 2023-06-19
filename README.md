@@ -58,7 +58,7 @@ _Work in progress_
 
 ### umenu2
 
-µ-menu library based on xxx's umenu lib.
+µ-menu library based on Paweł Ługowski's umenu lib.
 
 ## Untouched libs from other people
 
