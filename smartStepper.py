@@ -27,8 +27,7 @@ import machine
 import pulseGenerator
 import pulseCounter
 
-NB_ACCEL_PTS   = 100
-CONST_SPEED_DT = const(0.1)  # s
+NB_ACCEL_PTS = 100
 
 
 class SmartStepperError(Exception):
@@ -65,6 +64,7 @@ class SmartStepper:
 
         self._target = 0          # target position, in units
         self._direction = None    # current direction
+        self._jogging = False     # True when in jog mode (no fixed target)
         
         self._accelTable = []
         self._initAccelTable(accelCurve)
@@ -98,75 +98,86 @@ class SmartStepper:
         else:
             raise SmartStepperError(f"Unknown '{accelCurve}' acceleration curve")
 
-    def _accelPoints(self, maxSpeed):
-        """ Compute acceleration points
+    def _accelPoints(self, fromSpeed, toSpeed):
+        """ Compute acceleration (or deceleration) points from fromSpeed to toSpeed.
+
+        For deceleration (fromSpeed > toSpeed), generates the reversed acceleration
+        profile, which is valid because the smoothstep curves are point-symmetric.
+        Floating-point overshoot is trimmed rather than raised.
         """
+        if fromSpeed > toSpeed:
+            pts = self._accelPoints(toSpeed, fromSpeed)
+            pts.reverse()
+            return pts
+
         points = []
 
-        accelTime = (maxSpeed - self._minSpeed) / self._acceleration
-        accelDist = (maxSpeed**2 - self._minSpeed**2) / (2 * self._acceleration)
+        accelTime = (toSpeed - fromSpeed) / self._acceleration
+        accelDist = (toSpeed**2 - fromSpeed**2) / (2 * self._acceleration)
         accelSteps = round(accelDist * self._stepsPerUnit)
-#         print(f"DEBUG::  maxSpeed={maxSpeed}, accelTime={accelTime}, accelSteps={accelSteps}")
 
         realSteps = 0
         dt = accelTime / NB_ACCEL_PTS
         for i in range(NB_ACCEL_PTS):
             y = self._accelTable[i]
-            speed = maxSpeed * y + self._minSpeed * (1 - y)
+            speed = toSpeed * y + fromSpeed * (1 - y)
             pulses = round(speed * self._stepsPerUnit * dt)
             if pulses:
                 points.append((speed * self._stepsPerUnit, pulses))
             realSteps += pulses
-#         print(f"DEBUG::  real accelSteps={realSteps}")
 
-        # Correction
         if realSteps < accelSteps:
-#             print("DEBUG::  correction pulses={}".format(accelSteps-realSteps))
-            points.append((round(maxSpeed * self._stepsPerUnit), accelSteps-realSteps))
-            
+            points.append((toSpeed * self._stepsPerUnit, accelSteps - realSteps))
         elif realSteps > accelSteps:
-            raise RuntimeError("Overshoot!")
-            
-#         t = 0.
-#         print(f" time   freq stps")
-#         for freq, steps in points:
-#             print(f"{t:5.3f} {freq:6.1f} {steps:4d}")
-#             t += steps / freq
-
-#         print(f"  accelPoints={points}")
+            # Trim excess steps caused by floating-point rounding
+            excess = realSteps - accelSteps
+            while excess > 0 and points:
+                freq, n = points[-1]
+                trim = min(n, excess)
+                if n - trim > 0:
+                    points[-1] = (freq, n - trim)
+                else:
+                    points.pop()
+                excess -= trim
 
         return points
 
-    def _constSpeedPoints(self, speed, constDist):
-        """ Compute constant speed points
+    def _buildProfile(self, fromSpeed, remaining):
+        """ Build a complete motion profile from fromSpeed over remaining distance.
+
+        Computes the achievable peak speed given the distance, then produces
+        accel → [const speed] → decel segments.
+
+        Returns a list of (freq_steps_per_s, nbPulses) tuples for the pulse generator.
         """
+        if abs(remaining) < 1.0 / self._stepsPerUnit:
+            return []
+
+        # Peak speed achievable given remaining distance starting at fromSpeed.
+        # Derived from: accelUpDist + decelDist = |remaining|
+        #   (peak²-fromSpeed²)/(2a) + (peak²-minSpeed²)/(2a) = |remaining|
+        peak = math.sqrt(
+            (abs(remaining) * 2 * self._acceleration + fromSpeed**2 + self._minSpeed**2) / 2
+        )
+        maxSpeed = min(peak, self._maxSpeed)
+
         points = []
-        
-        constSteps = round(constDist * self._stepsPerUnit)
-        constTime = constDist / speed
-#         print(f"DEBUG::  constSteps={constSteps}")
 
-        nbPoints = int(constTime / CONST_SPEED_DT)
-        if nbPoints:
-            pulses = int(constSteps / nbPoints)
-            realSteps = 0
-            for i in range(nbPoints):
-                if pulses:
-                    points.append((speed * self._stepsPerUnit, int(pulses)))
-                realSteps += pulses
-        else:
-            realSteps = 0
-#         print(f"DEBUG::  real constSteps={realSteps}")
+        # Accel phase: fromSpeed → maxSpeed
+        if fromSpeed < maxSpeed - 1e-6:
+            points.extend(self._accelPoints(fromSpeed, maxSpeed))
 
-        # Correction
-        if realSteps < constSteps:
-#             print("DEBUG::  correction pulses={}".format(constSteps-realSteps))
-            points.append((speed * self._stepsPerUnit, constSteps-realSteps))
-            
-        elif realSteps > constSteps:
-            raise RuntimeError("Overshoot!")
+        # Const speed phase (only when we hit the maxSpeed ceiling and distance allows)
+        if maxSpeed >= self._maxSpeed - 1e-6:
+            accelUpDist = (maxSpeed**2 - fromSpeed**2) / (2 * self._acceleration)
+            decelDist   = (maxSpeed**2 - self._minSpeed**2) / (2 * self._acceleration)
+            constDist   = abs(remaining) - accelUpDist - decelDist
+            if constDist > 0:
+                points.append((maxSpeed * self._stepsPerUnit,
+                               round(constDist * self._stepsPerUnit)))
 
-#         print(f"  constPoints={points}")
+        # Decel phase: maxSpeed → minSpeed
+        points.extend(self._accelPoints(maxSpeed, self._minSpeed))
 
         return points
 
@@ -242,17 +253,17 @@ class SmartStepper:
         """ Set the min speed
 
         minSpeed is in units per second.
+        Can be changed while moving; triggers a motion replan.
         """
-        if self.moving:
-            raise SmartStepperError("Can't change 'min speed' while moving")
-
         if value == 0:
             raise SmartStepperError("min speed must be > 0")
-        
+
         if value > self._maxSpeed:
             raise SmartStepperError("min speed must be <= max speed")
-        
+
         self._minSpeed = value
+        if self.moving:
+            self._replan()
 
     @property
     def maxSpeed(self):
@@ -267,17 +278,17 @@ class SmartStepper:
         """ Set the max speed
 
         maxSpeed is in units per second.
+        Can be changed while moving; triggers a motion replan.
         """
-        if self.moving:
-            raise SmartStepperError("Can't change 'max speed' while moving")
-
         if value == 0:
             raise SmartStepperError("max speed must be > 0")
-        
+
         if value < self._minSpeed:
             raise SmartStepperError("max speed must be >= min speed")
 
         self._maxSpeed = value
+        if self.moving:
+            self._replan()
 
     @property
     def speed(self):
@@ -306,11 +317,11 @@ class SmartStepper:
         """ Set the acceleration
 
         acceleration is in units per second square.
+        Can be changed while moving; triggers a motion replan.
         """
-        if self.moving:
-            raise SmartStepperError("Can't change 'acceleration' while moving")
-
         self._acceleration = value
+        if self.moving:
+            self._replan()
 
     @property
     def stepsPerUnit(self):
@@ -368,7 +379,7 @@ class SmartStepper:
         if self.moving:
             raise SmartStepperError("Can't change 'position' while moving")
 
-        self._pulseCounter.value = value
+        self._pulseCounter.value = round(value * self._stepsPerUnit)
 
     @property
     def moving(self):
@@ -394,13 +405,13 @@ class SmartStepper:
         elif not self._minSpeed <= maxSpeed <= self._maxSpeed:
             raise SmartStepperError("'maxSpeed' is out of range")
 
+        self._jogging = True
         self._updateDirection(direction)
 
         points = []
-        
+
         # Acceleration
-#         print("\nDEBUG::Acceleration phase:")
-        points.extend(self._accelPoints(maxSpeed))
+        points.extend(self._accelPoints(self._minSpeed, maxSpeed))
 
         # Constant speed
 #         print("\nDEBUG::Constant speed phase:")
@@ -428,6 +439,8 @@ class SmartStepper:
         if self.moving:
             raise SmartStepperError("Can't 'moveto' while moving")
 
+        self._jogging = False
+
         if not relative:
             self._target = target
         else:
@@ -440,34 +453,9 @@ class SmartStepper:
         else:
             self._updateDirection('down')
         
-        points = []
-        
-        # Max speed depends on target distance from current position
-        # accelTime = (maxSpeed - self._minSpeed) / self._acceleration
-        # accelDist = (maxSpeed + self._minSpeed) / 2 * accelTime
-        # -> accelDist = (maxSpeed² - self._minSpeed²) / (2 * self._acceleration)
-        # condition: accelDist <= abs(self._target - self.position) / 2
-        maxSpeed = math.sqrt((abs(self._target - self.position) * 2 * self._acceleration + 2 * self._minSpeed**2) / 2)
-        maxSpeed = min(maxSpeed, self._maxSpeed)
+        remaining = abs(self._target - self.position)
+        points = self._buildProfile(self._minSpeed, remaining)
 
-        # Acceleration
-#         print("\nDEBUG::Acceleration phase:")
-        accelPoints = self._accelPoints(maxSpeed)
-        points.extend(accelPoints)
-       
-        # Constant speed
-        if maxSpeed == self._maxSpeed:
-#             print("\nDEBUG::Constant speed phase:")
-            accelDist = (maxSpeed**2 - self._minSpeed**2) / (2 * self._acceleration)
-            constDist = abs(self._target - self.position) - 2 * accelDist
-#             points.extend(self._constSpeedPoints(maxSpeed, constDist))
-            points.append((maxSpeed * self._stepsPerUnit, round(constDist * self._stepsPerUnit)))
- 
-        # Deceleration
-#         print("\nDEBUG::Deceleration phase")
-        accelPoints.reverse()
-        points.extend(accelPoints)
-        
         # Start the generator
         self._pulseGenerator.start(points)
 
@@ -477,16 +465,41 @@ class SmartStepper:
         Use deceleration unless emergency is True.
         """
 #         print("\nTRACE::stop()")
-        
+
         if not self.moving:
             raise SmartStepperError("Can't 'stop' while not moving")
-       
+
+        self._jogging = False
         self._pulseGenerator.stop()
+
+    def _replan(self):
+        """ Recompute and update the motion profile from the current state.
+
+        Called automatically when speed or acceleration is changed mid-move.
+        Non-blocking: rebuilds the profile and hands it to the pulse generator,
+        which performs a fast DMA abort+restart (~10µs).
+        No-op during jog (no fixed target to replan toward).
+        """
+        if self._jogging:
+            return
+
+        currentSpeed = self.speed
+        remaining = self._target - self.position
+
+        if abs(remaining) < 1.0 / self._stepsPerUnit:
+            self._pulseGenerator.stop()
+            return
+
+        points = self._buildProfile(currentSpeed, remaining)
+        if points:
+            self._pulseGenerator.update(points)
+        else:
+            self._pulseGenerator.stop()
 
     def waitEndOfMove(self):
         """
         """
-        while stepper.moving:
+        while self.moving:
             time.sleep_ms(1)
 
 

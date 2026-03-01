@@ -133,37 +133,56 @@ class PulseGenerator:
 #                 
 #         return data
 
+    def _buildSequence(self, points):
+        """ Build a DMA-ready word array from (freq, nbPulses) tuples.
+
+        Appends a (0, 0) sentinel so the PIO knows when the sequence ends.
+        """
+        sequence = array.array('I')
+        for freq, nbPulses in points:
+            sequence.append(round(SM_FREQ / freq / 2))
+            sequence.append(nbPulses - 1)
+        sequence.extend(array.array('I', (0, 0)))
+        return sequence
+
+    def _startDMA(self, sequence):
+        """ Configure and enable DMA for the given sequence array.
+
+        Saves sequence as self._sequence to prevent GC from reclaiming it
+        while DMA is active.
+        """
+        self._sequence = sequence  # keep alive for DMA
+        self._dma.config(
+            readAddr  = uctypes.addressof(sequence),
+            writeAddr = PIO_0_TXFn[PulseGenerator._num],
+            transCount = len(sequence),
+            readInc   = True,
+            writeInc  = False,
+            treqSel   = DMA_DREQ_PIO0_TXn[PulseGenerator._num],
+            dataSize  = dma.DMA.SIZE_WORD
+        )
+        self._dma.enable()
+
     def start(self, points):
         """
 
         points contains n tuples (freq, nbPulses) values.
         """
-        sequence = array.array('I')
+        self._dma.abort()  # stop any prior DMA
+        self._startDMA(self._buildSequence(points))
 
-        for freq, nbPulses in points:
-            sequence.append(round(SM_FREQ / freq / 2))
-            sequence.append(nbPulses - 1)
-        
-        # Add a final fake pulse to tell the State Machine that the sequence is over
-        sequence.extend(array.array('I', (0, 0)))
+    def update(self, points):
+        """ Replace the remaining motion profile without stopping the motor.
 
-        #print(sequence)
+        Non-blocking. Aborts the current DMA transfer and immediately starts a
+        new one from the rebuilt sequence. Any data already in the PIO TX FIFO
+        (at most 2 old segments) drains naturally before the new DMA data takes
+        over, giving a seamless transition at the current speed.
 
-        self._dma.abort()  # stop DMA
-        self._dma.config(
-            readAddr = uctypes.addressof(sequence),
-            writeAddr = PIO_0_TXFn[PulseGenerator._num],
-            transCount = len(sequence),
-            readInc = True,
-            writeInc = False,
-            treqSel = DMA_DREQ_PIO0_TXn[PulseGenerator._num],
-            dataSize = dma.DMA.SIZE_WORD
-        )
-
-#         self._startTime = time.ticks_ms()
-#         self._data = []
-
-        self._dma.enable()  # start DMA
+        points contains n tuples (freq, nbPulses) values.
+        """
+        self._dma.abort()
+        self._startDMA(self._buildSequence(points))
 
     def stop(self):
         """
@@ -193,7 +212,7 @@ def main():
         print("{:04d} {:02d}".format(pulseGenerator.freq, pulseGenerator._sm.tx_fifo()))
         
         if time.ticks_ms()-t > 9991200:
-            pulses.stop()
+            pulseGenerator.stop()
             break
         
         time.sleep(0.25)
