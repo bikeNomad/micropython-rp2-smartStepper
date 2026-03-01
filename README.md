@@ -1,13 +1,14 @@
 # smartStepper — MicroPython stepper motor library for RP2040
 
 A MicroPython library for smooth, non-blocking stepper motor control on the
-Raspberry Pi Pico (RP2040). Uses PIO state machines and DMA for precise,
+Raspberry Pi Pico (RP2040) and Pico2 (RP2350). Uses PIO state machines and DMA for precise,
 CPU-independent pulse generation and position counting.
 
 ## Features
 
 - Non-blocking absolute and relative moves (`moveTo`)
 - Non-blocking continuous jog (`jog`) with configurable speed
+- Async homing with configurable sensor polarity; handles pre-asserted sensor (`homing.py`)
 - Smooth acceleration and deceleration (linear, smooth1, smooth2/smootherstep, sine curves)
 - Graceful stop with deceleration, or emergency hard stop
 - Dynamic parameter adjustment (speed, acceleration) mid-move with automatic motion replan
@@ -21,6 +22,7 @@ CPU-independent pulse generation and position counting.
 | File | Description |
 | --- | --- |
 | `smartStepper.py` | High-level `SmartStepper` class |
+| `homing.py` | Async homing routine (three-phase, handles pre-asserted sensor) |
 | `pulseGenerator.py` | PIO + DMA pulse generator (internal) |
 | `pulseCounter.py` | PIO-based pulse counter for position tracking (internal) |
 | `test_smartStepper.py` | Manual tests and usage examples |
@@ -133,6 +135,48 @@ stepper.position = 0       # reset/home position (only when not moving)
 stepper.stop(emergency=True)   # cut pulses immediately (may lose steps)
 ```
 
+### Homing
+
+`homing.py` provides an async homing routine that works with any sensor that
+has a `value()` method (e.g. `machine.Pin`).
+
+**Phase 0 — initial backoff (if needed)**: if the sensor is already asserted
+when homing starts, jog away from it at `slowSpeed` until it de-asserts, then
+stop. This makes homing repeatable regardless of starting position.
+
+**Phase 1 — fast approach**: jog toward the sensor at `fastSpeed`. When the
+sensor asserts, decelerate smoothly to a stop.
+
+**Phase 2 — slow backoff**: jog away from the sensor at `slowSpeed`. The
+instant the sensor de-asserts, stop immediately and define that position as
+home (`position = 0`).
+
+```python
+import asyncio
+import homing
+
+sensor = machine.Pin(15, machine.Pin.IN, machine.Pin.PULL_UP)
+
+async def main():
+    await homing.home(
+        stepper,
+        sensor,
+        fastSpeed  = 40,     # units/s, approach speed
+        slowSpeed  = 2,      # units/s, backoff speed
+        direction  = 'down', # direction toward home sensor
+        activeState= 0,      # 0 = active-low (pull-up wiring)
+        timeout    = 10.0,   # raise HomingError if not done in 10 s
+    )
+    print("Homed at", stepper.position)  # always 0
+
+asyncio.run(main())
+```
+
+`activeState=1` for active-high sensors (pull-down or open-collector with
+external pull-up to logic level). `timeout=None` disables the timeout.
+`minSpeed` and `maxSpeed` are saved and restored after homing completes
+or times out.
+
 ## API reference
 
 ### Constructor
@@ -218,3 +262,5 @@ posted at [https://framagit.org/fma38/micropython-lib](https://framagit.org/fma3
   `pack_ctrl()` / `config()` API, drops `import uctypes` (array passed
   directly via buffer protocol), and is inherently RP2350-compatible.
 - Extracted test/demo code into `test_smartStepper.py`.
+- Added `homing.py`: async two-phase homing with configurable sensor polarity,
+  speed parameters, and timeout.
