@@ -1,91 +1,220 @@
-# Micropython lib
+# smartStepper — MicroPython stepper motor library for RP2040
 
-My collection of Micropython libs, based on existing libs, or entirely written from scratch.
+A MicroPython library for smooth, non-blocking stepper motor control on the
+Raspberry Pi Pico (RP2040). Uses PIO state machines and DMA for precise,
+CPU-independent pulse generation and position counting.
 
-Also contains untouched libs from other people.
+## Features
 
-## My own libs
+- Non-blocking absolute and relative moves (`moveTo`)
+- Non-blocking continuous jog (`jog`) with configurable speed
+- Smooth acceleration and deceleration (linear, smooth1, smooth2/smootherstep, sine curves)
+- Graceful stop with deceleration, or emergency hard stop
+- Dynamic parameter adjustment (speed, acceleration) mid-move with automatic motion replan
+- Position tracking via PIO pulse counter
+- Active-low enable pin support (auto-enabled on move start)
+- Move timeout with automatic emergency stop
+- Up to 4 simultaneous stepper instances (limited by RP2040 PIO state machines)
 
-### baos
+## Files
 
-**KNX Tiny Serial 810 “UART”** board handling. Based on original C code from Weinzierl Engineering GmbH.
+| File | Description |
+| --- | --- |
+| `smartStepper.py` | High-level `SmartStepper` class |
+| `pulseGenerator.py` | PIO + DMA pulse generator (internal) |
+| `pulseCounter.py` | PIO-based pulse counter for position tracking (internal) |
+| `test_smartStepper.py` | Manual tests and usage examples |
 
-### fsm
+## Usage
 
-Finite State Machine.
+### Basic setup
 
-### pidController
+```python
+import smartStepper
 
-Simple PID controller.
+stepper = smartStepper.SmartStepper(
+    stepPin=27,       # step pulse output pin number (or machine.Pin)
+    dirPin=26,        # direction output pin number (or machine.Pin)
+    enablePin=25,     # optional active-low enable pin (or None)
+    accelCurve='smooth2'  # 'linear', 'smooth1', 'smooth2', or 'sine'
+)
 
-### pys2x
+stepper.stepsPerUnit = 96.   # microsteps per mm (or whatever unit you use)
+stepper.minSpeed     = 1     # units/s — starting/stopping speed
+stepper.maxSpeed     = 50    # units/s — peak speed
+stepper.acceleration = 300   # units/s²
+```
 
-PS2 gamepad python support.
+### Absolute move
 
-### response
+```python
+stepper.moveTo(100)          # move to 100 mm (absolute)
+stepper.waitEndOfMove()      # block until done
 
-Time-based curve generator (used by SmartStepper class to generate acceleration curve).
+stepper.moveTo(0)            # return to origin
+stepper.waitEndOfMove()
+```
 
-### servo
+### Relative move
 
-Simple servo driving lib.
+```python
+stepper.moveTo(50, relative=True)   # move forward 50 mm
+stepper.waitEndOfMove()
 
-### sht15
+stepper.moveTo(-20, relative=True)  # move back 20 mm
+stepper.waitEndOfMove()
+```
 
-SHT15 sensor reader.
+### Move with timeout
 
-### signal
+```python
+try:
+    stepper.moveTo(200, timeout=5.0)   # fail if not done in 5 seconds
+    stepper.waitEndOfMove()
+except smartStepper.SmartStepperError as e:
+    print("Error:", e)   # "Move timed out" if motor stalled
+```
 
-Signal/slot management.
+Alternatively, poll without blocking:
 
-### smartButton
+```python
+stepper.moveTo(200, timeout=5.0)
+while stepper.moving:
+    if stepper.timedOut:
+        stepper.stop(emergency=True)
+        break
+    # ... do other work
+```
 
-Manage debouncing, click, double-click, long press...
+### Jog (continuous motion)
 
-### smartStepper
+```python
+stepper.jog(maxSpeed=30, direction='up')   # start jogging
+# ... application loop ...
+stepper.stop()                             # decelerate and stop
+stepper.waitEndOfMove()                    # wait for decel to finish
+```
 
-Stepper controller. Handle acceleration in both goto and jog modes.
+### Enable/disable motor driver
 
-### ssi (RPi pico)
+The enable pin is driven automatically when a move starts. You can also
+control it manually:
 
-SSI encoder reading.
+```python
+stepper.disable()   # de-energise coils (reduce heat / allow manual movement)
+stepper.enable()    # re-energise coils
+```
 
-### uGEM
+### Dynamic parameter changes mid-move
 
-Micropython port of Arduino GEM lib by ???.
+Speed and acceleration can be updated while the motor is moving. The motion
+profile is automatically rebuilt and handed to the DMA controller without
+stopping (~10 µs transition):
 
-_Work in progress_
+```python
+stepper.moveTo(500)
+time.sleep(0.5)
+stepper.maxSpeed = 20     # slow down on the fly
+time.sleep(0.5)
+stepper.maxSpeed = 80     # speed back up
+stepper.waitEndOfMove()
+```
 
-### umenu2
+### Position
 
-µ-menu library based on Paweł Ługowski's umenu lib.
+```python
+print(stepper.position)    # current position in units (read from PIO counter)
+stepper.position = 0       # reset/home position (only when not moving)
+```
 
-## Untouched libs from other people
+### Emergency stop
 
-### configParser
+```python
+stepper.stop(emergency=True)   # cut pulses immediately (may lose steps)
+```
 
-Simple config parser.
+## API reference
 
-### dma
+### Constructor
 
-DMA management.
+```python
+SmartStepper(stepPin, dirPin, enablePin=None, accelCurve='smooth2')
+```
 
-### logging
+### Properties
 
-Simple logging system.
+| Property | Writable | Description |
+| --- | --- | --- |
+| `position` | yes (stopped only) | Current position in units |
+| `target` | no | Target position set by last `moveTo()` |
+| `speed` | no | Current speed in units/s |
+| `direction` | no | `'up'`, `'down'`, or `None` |
+| `moving` | no | `True` while motor is running |
+| `timedOut` | no | `True` if move deadline has passed |
+| `minSpeed` | yes | Start/stop speed in units/s (triggers replan if moving) |
+| `maxSpeed` | yes | Peak speed in units/s (triggers replan if moving) |
+| `acceleration` | yes | Acceleration in units/s² (triggers replan if moving) |
+| `stepsPerUnit` | yes (stopped only) | Microsteps per unit |
+| `reverse` | yes (stopped only) | Invert direction pin polarity |
 
-### mpr121
+### Methods
 
-Pyboard LCD + touch driver.
+| Method | Description |
+| --- | --- |
+| `moveTo(target, relative=False, timeout=None)` | Start a move; non-blocking |
+| `jog(maxSpeed=None, direction='up')` | Start continuous jogging; non-blocking |
+| `stop(emergency=False)` | Stop with decel (default) or immediately |
+| `waitEndOfMove()` | Block until stopped; raises on timeout |
+| `enable()` | Assert enable pin (active-low) |
+| `disable()` | Release enable pin |
 
-### rotary (RPi Pico, Pyboard, Esp)
+## Hardware notes
 
-Quadrature encoder handling.
+- **Enable pin**: Most stepper drivers use an active-low enable signal. The
+  pin is driven high (disabled) at startup and low (enabled) automatically
+  when a move begins.
+- **Direction pin setup time**: The RP2040 PIO begins pulsing immediately
+  after direction is set. If your driver requires a direction-setup hold time,
+  add a short `time.sleep_us()` before calling `moveTo()`.
+- **Step pulse width**: The PIO generates a 50% duty-cycle square wave. Pulse
+  width = `1 / (2 × freq)`. At 10 kHz step rate this is 50 µs per half-cycle,
+  which is compatible with all common stepper drivers.
 
-### ssd1306
+## Credits
 
-SSD1306-based OLED displays driver.
+Original library by **Frédéric** (fma@gbiloba.org) (2023), 
+posted at [https://framagit.org/fma38/micropython-lib](https://framagit.org/fma38/micropython-lib), and licensed under the
+[GNU Affero General Public License v3](LICENSE).
 
-### umidiparser
+`pulseCounter.py` is based on original work by
+[Dave Hylands](https://github.com/dhylands/upy-examples/blob/master/pico/pio_pulse_counter.py).
 
-MIDI file parser.
+### Changes by Ned Konz (ned@metamagix.tech) (2026)
+
+- Fixed garbage-collector bug in `pulseGenerator.py`: DMA sequence array is
+  now pinned as an instance variable to prevent it from being collected while
+  DMA is active.
+- Added `PulseGenerator.update()` for non-blocking mid-run DMA replacement.
+- Generalised `_accelPoints()` to handle both acceleration and deceleration
+  (reversal of a symmetric smoothstep curve), replacing the separate
+  `_decelPoints()` method.
+- Added `_buildProfile()` unified motion planner used by `moveTo()` and
+  `_replan()`.
+- Added `_replan()` to rebuild the motion profile in-flight when speed or
+  acceleration is changed mid-move.
+- Made `minSpeed`, `maxSpeed`, and `acceleration` setters trigger `_replan()`
+  instead of raising an error when the motor is moving.
+- Added `stop(emergency=False)` with smooth deceleration by default.
+- Added active-low enable pin support (`enablePin` constructor argument,
+  `enable()` / `disable()` methods, auto-enable on move start).
+- Added `timeout` parameter to `moveTo()`, `timedOut` property, and timeout
+  handling in `waitEndOfMove()`.
+- Fixed `position` setter unit-conversion bug.
+- Fixed `waitEndOfMove()` self-reference bug.
+- Fixed multi-instance bug in `pulseGenerator.py`: SM index is now captured
+  as an instance variable at construction time rather than read from the class
+  variable (which could have been incremented by later instances).
+- Replaced custom `dma.py` with MicroPython's built-in `rp2.DMA`: uses
+  `pack_ctrl()` / `config()` API, drops `import uctypes` (array passed
+  directly via buffer protocol), and is inherently RP2350-compatible.
+- Extracted test/demo code into `test_smartStepper.py`.
