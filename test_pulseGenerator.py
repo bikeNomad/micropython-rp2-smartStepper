@@ -15,7 +15,7 @@ from test_config import STEP_PIN
 def main():
     """
     """
-    pg = pulseGenerator.PulseGenerator(machine.Pin(STEP_PIN, machine.Pin.OUT))
+    pg = pulseGenerator.PulseGenerator(machine.Pin(STEP_PIN, machine.Pin.OUT, value=0))
     points = ((1, 3), (5, 5))
     pg.start(points)
 
@@ -28,9 +28,10 @@ def main():
             pg.stop()
             break
 
-        time.sleep(0.25)
+        time.sleep(0.1)
 
     print("{:04d} {:02d}".format(pg.freq, pg._sm.tx_fifo()))
+    print(f"DONE total time: {(time.ticks_ms()-t)/1000:.3f} s")
 
 
 if __name__ == "__main__":

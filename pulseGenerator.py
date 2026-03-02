@@ -67,7 +67,7 @@ class PulseGenerator:
         # Cancel if pulseLength is 0
         mov(y, osr)             # store pulseLength to Y
         pull()                  # pull nbPulses from TX FIFO to OSR
-        jmp(y_dec, "end")       # jump to 'end' if Y is 0
+        jmp(y_dec, "end")       # jump to 'end' if Y is non-zero (pulseLength > 0 → end-of-sequence sentinel)
 
         mov(y, osr)             # store nbPulses to Y
         mov(osr, x)             # store back pulseLength to OSR
@@ -106,13 +106,20 @@ class PulseGenerator:
     def _buildSequence(self, points):
         """ Build a DMA-ready word array from (freq, nbPulses) tuples.
 
-        Appends a (0, 0) sentinel so the PIO knows when the sequence ends.
+        Appends a sentinel so the PIO knows when the sequence ends.
+
+        The sentinel uses pulseLength=0xFFFFFFFF (not 0) so that the PIO's
+        end-of-sequence check (jmp y_dec, "end") actually jumps — the jmp
+        condition is true when Y is non-zero, so pulseLength=0 would fall
+        through into the pulse loop and fire a spurious extra step.
+        freq(0xFFFFFFFF) = round(SM_FREQ / 0xFFFFFFFF / 2) = 0, so the ISR
+        still reports freq=0 and moving=False correctly.
         """
         sequence = array.array('I')
         for freq, nbPulses in points:
             sequence.append(round(SM_FREQ / freq / 2))
             sequence.append(nbPulses - 1)
-        sequence.extend(array.array('I', (0, 0)))
+        sequence.extend(array.array('I', (0xFFFFFFFF, 0)))
         return sequence
 
     def _startDMA(self, sequence):
