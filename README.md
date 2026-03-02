@@ -17,6 +17,33 @@ CPU-independent pulse generation and position counting.
 - Move timeout with automatic emergency stop
 - Up to 4 simultaneous stepper instances (limited by RP2040 PIO state machines)
 
+## Installation
+
+### On the Pico (via mip)
+
+From the MicroPython REPL:
+
+```python
+import mip
+mip.install("github:bikeNomad/micropython-rp2-smartStepper")
+```
+
+Or from the host via mpremote:
+
+```sh
+mpremote mip install github:bikeNomad/micropython-rp2-smartStepper
+```
+
+This installs `smartStepper.py`, `pulseGenerator.py`, `pulseCounter.py`, and `homing.py`.
+
+### Host-side test tools
+
+```sh
+pip install -e .
+```
+
+This installs `logic2-automation` and `mpremote`, which are required to run the HIL test suite (`tests/test_hil.py`).
+
 ## Files
 
 | File | Description |
@@ -25,7 +52,8 @@ CPU-independent pulse generation and position counting.
 | `homing.py` | Async homing routine (three-phase, handles pre-asserted sensor) |
 | `pulseGenerator.py` | PIO + DMA pulse generator (internal) |
 | `pulseCounter.py` | PIO-based pulse counter for position tracking (internal) |
-| `test_smartStepper.py` | Manual tests and usage examples |
+| `package.json` | MicroPython `mip` package descriptor |
+| `pyproject.toml` | Host-side test tool dependencies (`pip install -e .`) |
 
 Test scripts are in `tests/`:
 
