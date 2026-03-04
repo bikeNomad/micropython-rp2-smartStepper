@@ -50,10 +50,10 @@ class PulseGenerator:
     def _pioCode():
         """
 
-        In the routine, ISR contains pulseLength setpoint, and Y nbPulses counter.
-        X is used as pulseLength counter for each level. Y is decremented until 0.
+        In the routine, OSR contains pulseLength setpoint, and Y nbPulses counter.
+        X is used as pulseLength counter for each pulse. Y is decremented until 0.
         """
-
+        # fmt: off
         # Get input values (pulseLength, nbPulses)
         # Blocking
         pull().side(0)          # pull pulseLength from TX FIFO to OSR; set output LOW
@@ -61,14 +61,13 @@ class PulseGenerator:
 
         # Update freq
         mov(isr, x)             # store pulseLength to ISR
-        push()                  # push back pulseLength in RX FIFO
+        push()                  # push back pulseLength in RX FIFO and clear ISR
         irq(noblock, rel(0))    # notify ARM a new pulseLength is available
 
         # Cancel if pulseLength is 0
         mov(y, osr)             # store pulseLength to Y
         pull()                  # pull nbPulses from TX FIFO to OSR
-        jmp(y_dec, "end")       # jump to 'end' if Y is non-zero (pulseLength > 0 → end-of-sequence sentinel)
-
+        jmp(not_y, "end")       # jump to 'end' if Y is zero (pulseLength = 0 → end-of-sequence sentinel)
         mov(y, osr)             # store nbPulses to Y
         mov(osr, x)             # store back pulseLength to OSR
 
@@ -86,6 +85,7 @@ class PulseGenerator:
         jmp(y_dec, "start")     # loop if nbPulses is non 0; decrement nbPulses counter in all cases
 
         label("end")
+        # fmt: on
 
     def _pulseLengthISR(self, smId):
         """
@@ -105,21 +105,13 @@ class PulseGenerator:
 
     def _buildSequence(self, points):
         """ Build a DMA-ready word array from (freq, nbPulses) tuples.
-
-        Appends a sentinel so the PIO knows when the sequence ends.
-
-        The sentinel uses pulseLength=0xFFFFFFFF (not 0) so that the PIO's
-        end-of-sequence check (jmp y_dec, "end") actually jumps — the jmp
-        condition is true when Y is non-zero, so pulseLength=0 would fall
-        through into the pulse loop and fire a spurious extra step.
-        freq(0xFFFFFFFF) = round(SM_FREQ / 0xFFFFFFFF / 2) = 0, so the ISR
-        still reports freq=0 and moving=False correctly.
+        Appends a 0 pulseLength sentinel so the PIO knows when the sequence ends.
         """
         sequence = array.array('I')
         for freq, nbPulses in points:
             sequence.append(round(SM_FREQ / freq / 2))
             sequence.append(nbPulses - 1)
-        sequence.extend(array.array('I', (0xFFFFFFFF, 0)))
+        sequence.extend(array.array('I', (0, 0)))
         return sequence
 
     def _startDMA(self, sequence):
