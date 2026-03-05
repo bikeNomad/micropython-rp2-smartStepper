@@ -155,9 +155,32 @@ class PulseGenerator:
         (at most 2 old segments) drains naturally before the new DMA data takes
         over, giving a seamless transition at the current speed.
 
+        NOTE: only effective between PIO segments. If the current segment has
+        many pulses remaining (e.g. a long cruise), the new profile will not
+        start until that segment finishes. Use interrupt_with() when the new
+        profile must start within one half-period.
+
         points contains n tuples (freq, nbPulses) values.
         """
         self._dma.active(False)
+        self._startDMA(self._buildSequence(points))
+
+    def interrupt_with(self, points):
+        """ Interrupt the current segment and immediately start a new profile.
+
+        Zeroes the PIO Y register via sm.exec(), causing the current segment to
+        end after the current half-period (at most 1/freq seconds). The new DMA
+        is queued before the PIO reaches pull(block), so the transition is
+        smooth with at most one extra half-period at the old speed.
+
+        Use this instead of update() when the current segment may be long (e.g.
+        a cruise phase) and the new profile must start promptly — for example,
+        a smooth stop triggered mid-move.
+
+        points contains n tuples (freq, nbPulses) values.
+        """
+        self._dma.active(False)
+        self._sm.exec("mov(y, null)")  # end current segment after this half-period
         self._startDMA(self._buildSequence(points))
 
     def stop(self):

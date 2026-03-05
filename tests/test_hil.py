@@ -41,6 +41,7 @@ PICO_TEST_FILES = [
     str(_TESTS_DIR / 'test_config.py'),
     str(_TESTS_DIR / 'hil_moveto.py'),
     str(_TESTS_DIR / 'hil_replan.py'),
+    str(_TESTS_DIR / 'hil_stop_restart.py'),
 ]
 
 
@@ -208,6 +209,60 @@ def test_accel_profile(manager: saleae.Manager):
     print(f'  PASS  test_accel_profile  (peak {peak_hz:.0f} Hz, accel/decel ramps OK)')
 
 
+def test_stop_restart(manager: saleae.Manager):
+    """
+    Start a long move (500 units ≈ 48000 steps, ~10 s), issue stop() after
+    1 s mid-cruise, then move back to origin.
+
+    stop() calls interrupt_with() which zeroes the PIO Y register so the
+    current segment ends after one half-period, then plays a decel ramp to
+    minSpeed before halting.
+
+    Checks:
+      - Phase 1 stops before reaching the target (fewer than 40000 steps).
+      - Phase 1 produces at least 1000 steps, confirming the motor was
+        running before stop() was called.
+      - The final PulseCounter value is within 1 step of zero (origin).
+      - No gap between any two consecutive steps exceeds 3 s.
+    """
+    channels = [hil_config.STEP_CHANNEL, hil_config.DIR_CHANNEL]
+    tmpdir, stdout = run_capture(manager, 'hil_stop_restart.py', channels)
+
+    # Parse per-direction edge lists
+    step_edges  = parse_rising_edges(tmpdir / 'digital.csv', hil_config.STEP_CHANNEL)
+    assert len(step_edges) > 50, f'Too few pulses to verify stop+restart ({len(step_edges)})'
+
+    # Extract counts from Pico stdout
+    stopped_steps = final_steps = None
+    for line in stdout.splitlines():
+        if line.startswith('stopped steps='):
+            stopped_steps = int(line.split('=')[1])
+        elif line.startswith('done steps='):
+            final_steps = int(line.split('=')[1])
+
+    assert stopped_steps is not None, f'Pico did not print "stopped steps=..."\\nstdout: {stdout}'
+    assert final_steps   is not None, f'Pico did not print "done steps=..."\\nstdout: {stdout}'
+
+    # Phase 1: must have moved but not reached target (500 units * 96 = 48000 steps).
+    # After 1 s at ~4800 steps/s we expect ~4800 steps + decel tail.
+    assert stopped_steps > 1000, \
+        f'Phase 1 too short ({stopped_steps} steps); motor may not have started'
+    assert stopped_steps < 40000, \
+        f'Phase 1 reached target before stop() ({stopped_steps} steps)'
+
+    # After phase 2 the motor must be back near origin
+    assert abs(final_steps) <= 1, \
+        f'Motor did not return to origin; PulseCounter={final_steps}'
+
+    # No stall gap between the two phases
+    gaps = [step_edges[i + 1] - step_edges[i] for i in range(len(step_edges) - 1)]
+    max_gap = max(gaps)
+    assert max_gap < 3.0, f'Suspiciously long gap between pulses: {max_gap:.3f} s'
+
+    print(f'  PASS  test_stop_restart  '
+          f'(stopped at {stopped_steps} steps, returned to {final_steps})')
+
+
 def test_replan_profile(manager: saleae.Manager):
     """
     moveTo(100) at maxSpeed=50 (4800 Hz); after 1 s mid-cruise, maxSpeed is
@@ -249,6 +304,7 @@ TESTS = [
     test_moveto_pulse_count,
     test_accel_profile,
     test_replan_profile,
+    test_stop_restart,
 ]
 
 

@@ -456,7 +456,7 @@ class SmartStepper:
         else:
             points = self._accelPoints(self.speed, self._minSpeed)
             if points:
-                self._pulseGenerator.update(points)
+                self._pulseGenerator.interrupt_with(points)
             else:
                 self._pulseGenerator.stop()
 
