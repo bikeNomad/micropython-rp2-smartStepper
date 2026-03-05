@@ -126,11 +126,15 @@ class Axis:
     # Motion                                                               #
     # ------------------------------------------------------------------ #
 
-    def prepare_move(self, target, relative=False, accel_time=None, triangular=False):
+    def prepare_move(self, target, relative=False, accel_time=None, triangular=False,
+                     forced_peak=None):
         """Set up motion profile and configure DMA without starting it.
 
         Enforces hard limits: raises AxisError if the stepper's current
         maxSpeed or acceleration exceeds the hard limits set at construction.
+
+        forced_peak: peak speed in units/s to use directly (passed through to
+            SmartStepper._prepare_move). Used by MultiAxis for T_total sync.
 
         Returns the DMA channel number for multi-axis bitmask construction.
         """
@@ -145,7 +149,8 @@ class Axis:
                 f"{self._hard_max_accel}"
             )
         return self._stepper._prepare_move(
-            target, relative=relative, accel_time=accel_time, triangular=triangular
+            target, relative=relative, accel_time=accel_time, triangular=triangular,
+            forced_peak=forced_peak,
         )
 
     def start_move(self):

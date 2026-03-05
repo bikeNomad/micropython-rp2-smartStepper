@@ -486,12 +486,16 @@ class SmartStepper:
         # Start the generator
         self._pulseGenerator.start(points)
 
-    def _prepare_move(self, target, relative=False, accel_time=None, triangular=False):
+    def _prepare_move(self, target, relative=False, accel_time=None, triangular=False,
+                      forced_peak=None):
         """ Set up a move and configure DMA without triggering it.
 
         Identical to moveTo() except the pulse generator is primed via
         prepare() rather than start(). Call pulseGenerator._triggerDMA() (or
         PulseGenerator.trigger_channels()) to start the motor afterwards.
+
+        forced_peak: peak speed in units/s to use directly, bypassing the
+            natural peak computation. Used by MultiAxis for T_total sync.
 
         Returns the DMA channel number for bitmask construction.
         """
@@ -514,8 +518,7 @@ class SmartStepper:
 
         remaining = abs(self._target - self.position)
 
-        forced_peak = None
-        if accel_time is not None:
+        if forced_peak is None and accel_time is not None:
             forced_peak = self._minSpeed + self._acceleration * accel_time
             forced_peak = min(forced_peak, self._maxSpeed)
             if forced_peak < self._minSpeed:

@@ -389,19 +389,20 @@ def test_replan_profile(manager: saleae.Manager):
 
 
 def test_multiaxis_sync(manager: saleae.Manager):
-    """MultiAxis.move({x:50, y:5}) fires both DMA channels simultaneously.
+    """MultiAxis.move({x:40, y:10}) — simultaneous start AND simultaneous finish.
 
-    Axis 1: 50 units * 96 steps/unit = 4800 steps.
-      natural peak ≈ 122.6 u/s → capped to maxSpeed=50; accel time = 0.150 s.
-    Axis 2: 5 units * 96 steps/unit = 480 steps.
-      natural peak ≈ 39.1 u/s < 50; natural accel time ≈ 0.114 s.
-    t_common = 0.150 s (axis 1 dominates); axis 2 forced to 50 u/s peak.
+    Axis 1: 40 units * 96 steps/unit = 3840 steps.
+      Trapezoidal at maxSpeed=50; T_total = 0.934 s (dominant axis).
+    Axis 2: 10 units * 96 steps/unit = 960 steps.
+      Natural peak ~55 u/s → capped to 50; T_natural = 0.334 s.
+      MultiAxis binary-searches for v_peak ≈ 10.8 u/s → T_total = 0.934 s.
 
     Checks:
       - First rising edge on each axis within 100 µs of the other (hardware
         simultaneous start via DMA_MULTI_CHAN_TRIGGER).
-      - Step counts: axis 1 ≈ 4800 ± 2, axis 2 ≈ 480 ± 2.
-      - Accel-phase end times agree within 30 ms (both ramp for t_common).
+      - Step counts: axis 1 ≈ 3840 ± 2, axis 2 ≈ 960 ± 2.
+      - Last rising edge on each axis within 30 ms of the other (simultaneous
+        finish — the key CNC synchronization property).
       - Saleae counts match PulseCounter values from Pico stdout.
     """
     channels = [
@@ -423,28 +424,18 @@ def test_multiaxis_sync(manager: saleae.Manager):
         f'Start skew {skew_us:.1f} µs exceeds 100 µs — axes not started simultaneously?'
 
     # 2. Step counts.
-    assert abs(len(edges1) - 4800) <= 2, \
-        f'Axis 1: expected ~4800 pulses, got {len(edges1)}'
-    assert abs(len(edges2) - 480) <= 2, \
-        f'Axis 2: expected ~480 pulses, got {len(edges2)}'
+    assert abs(len(edges1) - 3840) <= 2, \
+        f'Axis 1: expected ~3840 pulses, got {len(edges1)}'
+    assert abs(len(edges2) - 960) <= 2, \
+        f'Axis 2: expected ~960 pulses, got {len(edges2)}'
 
-    # 3. Accel-phase end time alignment.
-    # Search for peak frequency in the first 60 % of each edge stream.  Using
-    # 60 % (rather than 40 %) ensures that axis 2's triangular profile apex —
-    # which occurs at the 50 % mark (240 of 480 steps) — falls inside the
-    # detection window.
-    def peak_time(edges):
-        window = edges[:max(4, len(edges) * 3 // 5)]  # first ~60 %
-        freqs = [1.0 / (window[i + 1] - window[i]) for i in range(len(window) - 1)]
-        idx = freqs.index(max(freqs))
-        return window[idx + 1]  # timestamp of the edge where peak freq occurs
-
-    t_peak1 = peak_time(edges1)
-    t_peak2 = peak_time(edges2)
-    accel_skew_ms = abs(t_peak1 - t_peak2) * 1e3
-    assert accel_skew_ms < 50, \
-        (f'Accel-phase end skew {accel_skew_ms:.1f} ms > 50 ms — '
-         f'axes not sharing t_common?')
+    # 3. Simultaneous finish: last rising edges must agree within 30 ms.
+    # This validates CNC-style T_total synchronization (both axes arrive
+    # at the target at the same time, not just the same accel duration).
+    end_skew_ms = abs(edges1[-1] - edges2[-1]) * 1e3
+    assert end_skew_ms < 30, \
+        (f'End-time skew {end_skew_ms:.1f} ms > 30 ms — '
+         f'axes not finishing together?')
 
     # 4. PulseCounter cross-check from Pico stdout.
     pico_x = pico_y = None
@@ -461,7 +452,7 @@ def test_multiaxis_sync(manager: saleae.Manager):
         f'Axis 2: Saleae ({len(edges2)}) ≠ PulseCounter ({pico_y})'
 
     print(f'  PASS  test_multiaxis_sync  '
-          f'(start skew {skew_us:.1f} µs, accel skew {accel_skew_ms:.1f} ms, '
+          f'(start skew {skew_us:.1f} µs, end skew {end_skew_ms:.1f} ms, '
           f'{len(edges1)}/{len(edges2)} steps)')
 
 
