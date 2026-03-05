@@ -100,22 +100,28 @@ class SmartStepper:
         else:
             raise SmartStepperError(f"Unknown '{accelCurve}' acceleration curve")
 
-    def _accelPoints(self, fromSpeed, toSpeed):
+    def _accelPoints(self, fromSpeed, toSpeed, accel=None):
         """ Compute acceleration (or deceleration) points from fromSpeed to toSpeed.
 
         For deceleration (fromSpeed > toSpeed), generates the reversed acceleration
         profile, which is valid because the smoothstep curves are point-symmetric.
         Floating-point overshoot is trimmed rather than raised.
+
+        accel overrides self._acceleration for this call (used by triangular and
+        accel_time moves that require a different effective acceleration).
         """
+        if accel is None:
+            accel = self._acceleration
+
         if fromSpeed > toSpeed:
-            pts = self._accelPoints(toSpeed, fromSpeed)
+            pts = self._accelPoints(toSpeed, fromSpeed, accel=accel)
             pts.reverse()
             return pts
 
         points = []
 
-        accelTime = (toSpeed - fromSpeed) / self._acceleration
-        accelDist = (toSpeed**2 - fromSpeed**2) / (2 * self._acceleration)
+        accelTime = (toSpeed - fromSpeed) / accel
+        accelDist = (toSpeed**2 - fromSpeed**2) / (2 * accel)
         accelSteps = round(accelDist * self._stepsPerUnit)
 
         realSteps = 0
@@ -144,42 +150,65 @@ class SmartStepper:
 
         return points
 
-    def _buildProfile(self, fromSpeed, remaining):
+    def _buildProfile(self, fromSpeed, remaining, triangular=False, forced_peak=None):
         """ Build a complete motion profile from fromSpeed over remaining distance.
 
         Computes the achievable peak speed given the distance, then produces
         accel → [const speed] → decel segments.
+
+        triangular=True: no constant-velocity section; peak speed is the natural
+        fit for the distance. If the natural peak would exceed maxSpeed, the
+        effective acceleration is reduced so peak == maxSpeed exactly.
+
+        forced_peak: skip peak computation and use this value directly (used by
+        accel_time moves and MultiAxis). A const-speed section is added if needed.
 
         Returns a list of (freq_steps_per_s, nbPulses) tuples for the pulse generator.
         """
         if abs(remaining) < 1.0 / self._stepsPerUnit:
             return []
 
-        # Peak speed achievable given remaining distance starting at fromSpeed.
-        # Derived from: accelUpDist + decelDist = |remaining|
-        #   (peak²-fromSpeed²)/(2a) + (peak²-minSpeed²)/(2a) = |remaining|
-        peak = math.sqrt(
-            (abs(remaining) * 2 * self._acceleration + fromSpeed**2 + self._minSpeed**2) / 2
-        )
-        maxSpeed = min(peak, self._maxSpeed)
+        accel = self._acceleration  # may be overridden below
+
+        if forced_peak is not None:
+            peakSpeed = min(forced_peak, self._maxSpeed)
+        else:
+            # Peak speed achievable given remaining distance starting at fromSpeed.
+            # Derived from: accelUpDist + decelDist = |remaining|
+            #   (peak²-fromSpeed²)/(2a) + (peak²-minSpeed²)/(2a) = |remaining|
+            # This formula is valid for all four accel curve types because every
+            # curve has a mean value of 0.5, making distance = (v²-v0²)/(2a).
+            peak = math.sqrt(
+                (abs(remaining) * 2 * accel + fromSpeed**2 + self._minSpeed**2) / 2
+            )
+
+            if triangular and peak > self._maxSpeed:
+                # Reduce acceleration so the move stays triangular at maxSpeed.
+                # Solve peak=maxSpeed in the distance formula for accel:
+                #   maxSpeed² = (|remaining|·2·accel_eff + fromSpeed² + minSpeed²) / 2
+                accel = (2 * self._maxSpeed**2 - fromSpeed**2 - self._minSpeed**2) / (2 * abs(remaining))
+                peakSpeed = self._maxSpeed
+            else:
+                peakSpeed = min(peak, self._maxSpeed)
 
         points = []
 
-        # Accel phase: fromSpeed → maxSpeed
-        if fromSpeed < maxSpeed - 1e-6:
-            points.extend(self._accelPoints(fromSpeed, maxSpeed))
+        # Accel phase: fromSpeed → peakSpeed
+        if fromSpeed < peakSpeed - 1e-6:
+            points.extend(self._accelPoints(fromSpeed, peakSpeed, accel=accel))
 
-        # Const speed phase (only when we hit the maxSpeed ceiling and distance allows)
-        if maxSpeed >= self._maxSpeed - 1e-6:
-            accelUpDist = (maxSpeed**2 - fromSpeed**2) / (2 * self._acceleration)
-            decelDist   = (maxSpeed**2 - self._minSpeed**2) / (2 * self._acceleration)
+        # Const speed phase — omitted for triangular moves; present when forced_peak
+        # is set (accel_time / MultiAxis) or when the move hits the speed ceiling.
+        if not triangular and (forced_peak is not None or peakSpeed >= self._maxSpeed - 1e-6):
+            accelUpDist = (peakSpeed**2 - fromSpeed**2) / (2 * accel)
+            decelDist   = (peakSpeed**2 - self._minSpeed**2) / (2 * accel)
             constDist   = abs(remaining) - accelUpDist - decelDist
             if constDist > 0:
-                points.append((maxSpeed * self._stepsPerUnit,
+                points.append((peakSpeed * self._stepsPerUnit,
                                round(constDist * self._stepsPerUnit)))
 
-        # Decel phase: maxSpeed → minSpeed
-        points.extend(self._accelPoints(maxSpeed, self._minSpeed))
+        # Decel phase: peakSpeed → minSpeed
+        points.extend(self._accelPoints(peakSpeed, self._minSpeed, accel=accel))
 
         return points
 
@@ -397,11 +426,17 @@ class SmartStepper:
         # Start the generator
         self._pulseGenerator.start(points)
 
-    def moveTo(self, target, relative=False, timeout=None):
+    def moveTo(self, target, relative=False, timeout=None, triangular=False, accel_time=None):
         """ Move to target
 
         target is in units.
         timeout is in seconds (None = no timeout).
+        triangular=True: no constant-velocity section; motor accelerates then
+            immediately decelerates. If the natural peak would exceed maxSpeed,
+            acceleration is reduced so the move is triangular at maxSpeed.
+        accel_time: duration of the acceleration phase in seconds. The peak speed
+            is fromSpeed + acceleration × accel_time, clamped to maxSpeed. Any
+            remaining distance is covered at constant speed.
         Handle acceleration.
         Non blocking.
         """
@@ -431,7 +466,16 @@ class SmartStepper:
             self._updateDirection('down')
 
         remaining = abs(self._target - self.position)
-        points = self._buildProfile(self._minSpeed, remaining)
+
+        forced_peak = None
+        if accel_time is not None:
+            forced_peak = self._minSpeed + self._acceleration * accel_time
+            forced_peak = min(forced_peak, self._maxSpeed)
+            if forced_peak < self._minSpeed:
+                raise SmartStepperError("accel_time too short: peak speed below minSpeed")
+
+        points = self._buildProfile(self._minSpeed, remaining,
+                                    triangular=triangular, forced_peak=forced_peak)
 
         # Start the generator
         self._pulseGenerator.start(points)

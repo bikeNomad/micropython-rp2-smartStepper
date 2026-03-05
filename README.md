@@ -9,7 +9,7 @@ CPU-independent pulse generation and position counting.
 - Non-blocking absolute and relative moves (`moveTo`)
 - Non-blocking continuous jog (`jog`) with configurable speed
 - Async homing with configurable sensor polarity; handles pre-asserted sensor (`homing.py`)
-- Smooth acceleration and deceleration (linear, smooth1, smooth2/smootherstep, sine curves)
+- Smooth acceleration and deceleration (4 curves: linear, smooth1, smooth2/smootherstep, sine — see [Acceleration curves](#acceleration-curves))
 - Graceful stop with deceleration, or emergency hard stop
 - Dynamic parameter adjustment (speed, acceleration) mid-move with automatic motion replan
 - Position tracking via PIO pulse counter
@@ -177,6 +177,38 @@ stepper.moveTo(-20, relative=True)  # move back 20 mm
 stepper.waitEndOfMove()
 ```
 
+### Triangular move (no constant-velocity phase)
+
+A triangular move accelerates directly to its peak speed and then immediately
+decelerates, with no constant-velocity cruise section. This is useful for
+short, precise point-to-point moves or where a symmetric speed profile is
+required.
+
+```python
+stepper.moveTo(10, triangular=True)   # accel → decel, no cruise
+stepper.waitEndOfMove()
+```
+
+If the natural peak speed for the given distance would exceed `maxSpeed`, the
+acceleration is automatically reduced so the move remains triangular at
+`maxSpeed` (still no cruise section).
+
+### Move with a fixed acceleration time
+
+`accel_time` specifies how long the acceleration phase should last (in
+seconds). The peak speed is `minSpeed + acceleration × accel_time`, clamped
+to `maxSpeed`. Any remaining distance is covered at that peak speed before
+decelerating.
+
+```python
+stepper.moveTo(100, accel_time=0.5)   # accelerate for exactly 0.5 s, then cruise and decel
+stepper.waitEndOfMove()
+```
+
+This is primarily used for multi-axis synchronization: compute the longest
+acceleration time across all axes, then give every axis the same `accel_time`
+so all acceleration phases take identical durations.
+
 ### Move with timeout
 
 ```python
@@ -289,6 +321,37 @@ external pull-up to logic level). `timeout=None` disables the timeout.
 `minSpeed` and `maxSpeed` are saved and restored after homing completes
 or times out.
 
+## Acceleration curves
+
+The `accelCurve` constructor argument selects the shape of the speed ramp
+used during acceleration and deceleration. All four curves cover the same
+distance in the same time for a given speed change — they differ in how
+smoothly they distribute jerk (rate of change of acceleration).
+
+| Curve | Description |
+| --- | --- |
+| `linear` | Constant acceleration; abrupt jerk spike at ramp start and end |
+| `smooth1` | Hermite smoothstep — zero acceleration at endpoints, moderate jerk |
+| `smooth2` | Smootherstep *(default)* — zero acceleration **and** zero jerk at endpoints |
+| `sine` | Half-cosine ramp — similar to `smooth1`, slightly different mid-ramp shape |
+
+The plot below shows a 100-unit move with `min_speed=5`, `max_speed=50`,
+`acceleration=200` for all four curves. Speed and position are nearly
+identical; the differences appear in the acceleration and jerk subplots.
+
+`smooth2` (green) is the recommended default: its zero-jerk endpoints
+produce the smoothest motor behaviour and the least mechanical stress.
+`linear` (red) has the fastest transition through the ramp but imposes
+sharp jerk at the start and end of every phase.
+
+![Acceleration curve comparison](docs/accel_curves.png)
+
+To regenerate this diagram after changing parameters:
+
+```sh
+python tools/plot_profiles.py --output docs/accel_curves.png
+```
+
 ## API reference
 
 ### Constructor
@@ -317,7 +380,7 @@ SmartStepper(stepPin, dirPin, enablePin=None, accelCurve='smooth2')
 
 | Method | Description |
 | --- | --- |
-| `moveTo(target, relative=False, timeout=None)` | Start a move; non-blocking |
+| `moveTo(target, relative=False, timeout=None, triangular=False, accel_time=None)` | Start a move; non-blocking |
 | `jog(maxSpeed=None, direction='up')` | Start continuous jogging; non-blocking |
 | `stop(emergency=False)` | Stop with decel (default) or immediately |
 | `waitEndOfMove()` | Block until stopped; raises on timeout |
@@ -376,3 +439,11 @@ posted at [framagit.org/fma38/micropython-lib](https://framagit.org/fma38/microp
 - Extracted test/demo code into `test_smartStepper.py`.
 - Added `homing.py`: async three-phase homing with configurable sensor polarity,
   speed parameters, and timeout.
+- Added `triangular=True` parameter to `moveTo()`: produces a profile with no
+  constant-velocity section; if the natural peak would exceed `maxSpeed`,
+  acceleration is automatically reduced.
+- Added `accel_time` parameter to `moveTo()`: fixes the duration of the
+  acceleration phase, enabling precise multi-axis synchronization.
+- Refactored `_accelPoints()` to accept an explicit `accel` override so that
+  triangular and `accel_time` moves can use a per-move effective acceleration
+  without altering the stepper's `acceleration` property.

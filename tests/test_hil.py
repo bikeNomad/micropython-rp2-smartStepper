@@ -42,6 +42,8 @@ PICO_TEST_FILES = [
     str(_TESTS_DIR / 'hil_moveto.py'),
     str(_TESTS_DIR / 'hil_replan.py'),
     str(_TESTS_DIR / 'hil_stop_restart.py'),
+    str(_TESTS_DIR / 'hil_triangular.py'),
+    str(_TESTS_DIR / 'hil_accel_time.py'),
 ]
 
 
@@ -263,6 +265,89 @@ def test_stop_restart(manager: saleae.Manager):
           f'(stopped at {stopped_steps} steps, returned to {final_steps})')
 
 
+def test_triangular_profile(manager: saleae.Manager):
+    """
+    moveTo(5, triangular=True) with stepsPerUnit=96, maxSpeed=50, accel=300.
+
+    Natural peak ≈ 39.1 units/s → ~3753 Hz; no constant-velocity section.
+    Expected ~480 pulses. Frequency must rise monotonically to a single peak
+    near the midpoint of the move, then fall monotonically — with no plateau.
+    """
+    channels = [hil_config.STEP_CHANNEL]
+    tmpdir, _ = run_capture(manager, 'hil_triangular.py', channels)
+
+    edges = parse_rising_edges(tmpdir / 'digital.csv', hil_config.STEP_CHANNEL)
+    assert abs(len(edges) - 480) <= 2, f'Expected ~480 pulses, got {len(edges)}'
+    assert len(edges) > 20, f'Too few pulses to analyze profile ({len(edges)})'
+
+    freqs = [1.0 / (edges[i + 1] - edges[i]) for i in range(len(edges) - 1)]
+    peak_hz = max(freqs)
+    peak_idx = freqs.index(peak_hz)
+    total = len(freqs)
+
+    # Peak should be near the midpoint (between 30 % and 70 % of the move).
+    assert 0.30 * total < peak_idx < 0.70 * total, \
+        f'Triangular peak not near midpoint: idx {peak_idx}/{total}'
+
+    # First 1/8: frequency must trend upward (accel ramp).
+    # Check every-other-sample to tolerate per-segment quantization jitter
+    # (adjacent timing measurements can alternate ±1–2 Hz due to integer step counts).
+    n = max(5, total // 8)
+    accel_section = freqs[:n]
+    assert all(accel_section[i] <= accel_section[i + 2]
+               for i in range(len(accel_section) - 2)), \
+        f'Accel ramp not trending upward: {[f"{f:.0f}" for f in accel_section]}'
+
+    # Last 1/8: frequency must trend downward (decel ramp).
+    decel_section = freqs[-n:]
+    assert all(decel_section[i] >= decel_section[i + 2]
+               for i in range(len(decel_section) - 2)), \
+        f'Decel ramp not trending downward: {[f"{f:.0f}" for f in decel_section]}'
+
+    # No plateau: cruise speed stays below maxSpeed ceiling (50 * 96 = 4800 Hz).
+    assert peak_hz < 4500, \
+        f'Triangular peak {peak_hz:.0f} Hz reached maxSpeed ceiling — const section present?'
+
+    print(f'  PASS  test_triangular_profile  '
+          f'({len(edges)} pulses, peak {peak_hz:.0f} Hz at idx {peak_idx}/{total})')
+
+
+def test_accel_time_profile(manager: saleae.Manager):
+    """
+    moveTo(50, accel_time=0.1) with stepsPerUnit=96, maxSpeed=50, accel=300.
+
+    forced_peak = 5 + 300*0.1 = 35 units/s → ~3360 Hz cruise (below maxSpeed=50).
+    Expected ~4800 pulses. Cruise section must be near 3360 Hz, not 4800 Hz.
+    """
+    channels = [hil_config.STEP_CHANNEL]
+    tmpdir, _ = run_capture(manager, 'hil_accel_time.py', channels)
+
+    edges = parse_rising_edges(tmpdir / 'digital.csv', hil_config.STEP_CHANNEL)
+    assert abs(len(edges) - 4800) <= 2, f'Expected ~4800 pulses, got {len(edges)}'
+    assert len(edges) > 50, f'Too few pulses to analyze profile ({len(edges)})'
+
+    freqs = [1.0 / (edges[i + 1] - edges[i]) for i in range(len(edges) - 1)]
+    peak_hz = max(freqs)
+
+    # forced_peak=35 units/s → ~3360 Hz; allow ±15 % for discretisation.
+    assert 2800 < peak_hz < 4000, \
+        f'Peak {peak_hz:.0f} Hz not in expected range for forced_peak=35 u/s (2800–4000 Hz)'
+
+    # Motor must not reach maxSpeed (50 * 96 = 4800 Hz).
+    assert peak_hz < 4500, \
+        f'Peak {peak_hz:.0f} Hz reached maxSpeed ceiling — accel_time clamp not working?'
+
+    # Middle 50 % of the move should be the constant-speed cruise near forced_peak.
+    mid_start = len(freqs) // 4
+    mid_end   = 3 * len(freqs) // 4
+    avg_cruise = sum(freqs[mid_start:mid_end]) / (mid_end - mid_start)
+    assert 2800 < avg_cruise < 4000, \
+        f'Cruise avg {avg_cruise:.0f} Hz not near forced_peak=35 u/s (expected ~3360 Hz)'
+
+    print(f'  PASS  test_accel_time_profile  '
+          f'({len(edges)} pulses, peak {peak_hz:.0f} Hz, cruise avg {avg_cruise:.0f} Hz)')
+
+
 def test_replan_profile(manager: saleae.Manager):
     """
     moveTo(100) at maxSpeed=50 (4800 Hz); after 1 s mid-cruise, maxSpeed is
@@ -303,6 +388,8 @@ TESTS = [
     test_pulse_generator,
     test_moveto_pulse_count,
     test_accel_profile,
+    test_triangular_profile,
+    test_accel_time_profile,
     test_replan_profile,
     test_stop_restart,
 ]
