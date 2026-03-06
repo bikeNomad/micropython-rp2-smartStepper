@@ -218,6 +218,22 @@ class SmartStepper:
 
         return points
 
+    def _profile_time(self, distance, forced_peak=None):
+        """Return the actual total move duration for a given distance.
+
+        Builds the full motion profile (same computation as prepare_move /
+        moveTo) and sums the real PIO-segment durations.  This accounts for
+        integer-step rounding in _accelPoints so the result matches what the
+        hardware will actually execute, unlike a continuous-time approximation.
+
+        Used by MultiAxis to get an accurate T_dominant and to drive the
+        binary search for subordinate-axis peak speeds.
+        """
+        points = self._buildProfile(self._minSpeed, distance, forced_peak=forced_peak)
+        if not points:
+            return 0.0
+        return sum(n / f for f, n in points)
+
     def _updateDirection(self, direction):
         """ Update dir pin / pulseCounter according to direction
         """

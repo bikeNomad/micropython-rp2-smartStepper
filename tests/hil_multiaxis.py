@@ -2,12 +2,13 @@
 
 Parameters (chosen so axes have different natural total times):
   Axis 1: 40 units * 96 steps/unit = 3840 steps
-    natural peak = 50 u/s (capped); T_total = 0.300 + 0.634 = 0.934 s
-  Axis 2: 10 units * 96 steps/unit = 960 steps
-    natural peak ~= 55 u/s -> capped to 50; T_natural ~= 0.334 s
-    MultiAxis slows axis 2 to v_peak ~= 10.8 u/s -> T_total ~= 0.934 s
+    natural peak = 50 u/s (capped); T_total ~= 0.934 s (dominant)
+  Axis 2: 30 units * 96 steps/unit = 2880 steps
+    natural peak ~= 95 u/s -> capped to 50; T_natural ~= 0.733 s
+    MultiAxis slows axis 2 to v_peak ~= 35 u/s -> T_total ~= 0.934 s
 
 Both axes start simultaneously (DMA_MULTI_CHAN_TRIGGER) and finish together.
+Axis 2's accel ramp (5 -> 35 u/s) is visible on the logic analyser.
 
 Expected output line: done x_steps=<n> y_steps=<m>
 """
@@ -34,7 +35,7 @@ ma = MultiAxis([x, y])
 
 
 async def main():
-    ma.move({x: 40, y: 10})
+    ma.move({x: 40, y: 30})
     await ma.wait_done()
     print("done x_steps={} y_steps={}".format(
         s1._pulseCounter.value, s2._pulseCounter.value))

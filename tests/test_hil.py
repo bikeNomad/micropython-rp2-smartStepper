@@ -389,19 +389,20 @@ def test_replan_profile(manager: saleae.Manager):
 
 
 def test_multiaxis_sync(manager: saleae.Manager):
-    """MultiAxis.move({x:40, y:10}) — simultaneous start AND simultaneous finish.
+    """MultiAxis.move({x:40, y:30}) — simultaneous start AND simultaneous finish.
 
     Axis 1: 40 units * 96 steps/unit = 3840 steps.
-      Trapezoidal at maxSpeed=50; T_total = 0.934 s (dominant axis).
-    Axis 2: 10 units * 96 steps/unit = 960 steps.
-      Natural peak ~55 u/s → capped to 50; T_natural = 0.334 s.
-      MultiAxis binary-searches for v_peak ≈ 10.8 u/s → T_total = 0.934 s.
+      Trapezoidal at maxSpeed=50; T_total ~= 0.934 s (dominant axis).
+    Axis 2: 30 units * 96 steps/unit = 2880 steps.
+      Natural peak ~95 u/s → capped to 50; T_natural ~= 0.733 s.
+      MultiAxis binary-searches for v_peak ~= 35 u/s → T_total ~= 0.934 s.
+      The 5→35 u/s accel ramp is visible on the logic analyser.
 
     Checks:
       - First rising edge on each axis within 100 µs of the other (hardware
         simultaneous start via DMA_MULTI_CHAN_TRIGGER).
-      - Step counts: axis 1 ≈ 3840 ± 2, axis 2 ≈ 960 ± 2.
-      - Last rising edge on each axis within 30 ms of the other (simultaneous
+      - Step counts: axis 1 ≈ 3840 ± 2, axis 2 ≈ 2880 ± 2.
+      - Last rising edge on each axis within 20 ms of the other (simultaneous
         finish — the key CNC synchronization property).
       - Saleae counts match PulseCounter values from Pico stdout.
     """
@@ -426,24 +427,28 @@ def test_multiaxis_sync(manager: saleae.Manager):
     # 2. Step counts.
     assert abs(len(edges1) - 3840) <= 2, \
         f'Axis 1: expected ~3840 pulses, got {len(edges1)}'
-    assert abs(len(edges2) - 960) <= 2, \
-        f'Axis 2: expected ~960 pulses, got {len(edges2)}'
+    assert abs(len(edges2) - 2880) <= 2, \
+        f'Axis 2: expected ~2880 pulses, got {len(edges2)}'
 
-    # 3. Simultaneous finish: last rising edges must agree within 30 ms.
+    # 3. Simultaneous finish: last rising edges must agree within 20 ms.
     # This validates CNC-style T_total synchronization (both axes arrive
     # at the target at the same time, not just the same accel duration).
+    # MultiAxis uses _profile_time() (actual segment sums) in the binary
+    # search, so finish times should agree to within a few step periods.
     end_skew_ms = abs(edges1[-1] - edges2[-1]) * 1e3
-    assert end_skew_ms < 30, \
-        (f'End-time skew {end_skew_ms:.1f} ms > 30 ms — '
+    assert end_skew_ms < 20, \
+        (f'End-time skew {end_skew_ms:.1f} ms > 20 ms — '
          f'axes not finishing together?')
 
     # 4. PulseCounter cross-check from Pico stdout.
+    # stdout line: "done x_steps=3840 y_steps=2879"
+    # parts:        ['done', 'x_steps=3840', 'y_steps=2879']
     pico_x = pico_y = None
     for line in stdout.splitlines():
         if line.startswith('done x_steps='):
             parts = line.split()
-            pico_x = int(parts[0].split('=')[1])
-            pico_y = int(parts[1].split('=')[1])
+            pico_x = int(parts[1].split('=')[1])
+            pico_y = int(parts[2].split('=')[1])
             break
     assert pico_x is not None, f'Pico did not print "done x_steps=..."\\nstdout: {stdout}'
     assert len(edges1) == pico_x, \
