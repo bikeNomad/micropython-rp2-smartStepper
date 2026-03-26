@@ -136,13 +136,14 @@ class PulseGenerator:
         """ Build a DMA-ready word array from (freq, nbPulses) tuples.
         Appends a 0 pulseLength sentinel so the PIO knows when the sequence ends.
         """
-        sequence = array.array('I')
+        sequence = array.array('I', bytearray(len(points)*8 + 8))
+        i = 0
         for freq, nbPulses in points:
             if nbPulses < 1:  # guard: 0-pulse segments wrap to 0xFFFFFFFF → 2³² steps
                 continue
-            sequence.append(round(SM_FREQ / freq / 2))
-            sequence.append(nbPulses - 1)
-        sequence.extend(array.array('I', (0, 0)))
+            sequence[i] = round(SM_FREQ / freq / 2)
+            sequence[i+1] = nbPulses - 1
+            i += 2
         return sequence
 
     def _configureDMA(self, sequence):
