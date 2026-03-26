@@ -5,6 +5,7 @@
 import array
 import rp2
 import machine
+import micropython
 from micropython import const
 
 SM_FREQ = const(10_000_000)  # Hz
@@ -139,6 +140,7 @@ class PulseGenerator:
 
         return freq
 
+    @micropython.native
     def _buildSequence(self, points):
         """Build a DMA-ready word array from (freq, nbPulses) tuples.
         Appends a 0 pulseLength sentinel so the PIO knows when the sequence ends.

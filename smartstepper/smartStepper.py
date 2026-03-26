@@ -102,6 +102,7 @@ class SmartStepper:
         else:
             raise SmartStepperError(f"Unknown '{accelCurve}' acceleration curve")
 
+    @micropython.native
     def _accelPoints(self, fromSpeed, toSpeed, accel=None):
         """Compute acceleration (or deceleration) points from fromSpeed to toSpeed.
 
@@ -121,23 +122,28 @@ class SmartStepper:
             return pts
 
         points = []
+        points_append = points.append
+
+        spu = self._stepsPerUnit
+        accelTable = self._accelTable
 
         accelTime = (toSpeed - fromSpeed) / accel
         accelDist = (toSpeed**2 - fromSpeed**2) / (2 * accel)
-        accelSteps = round(accelDist * self._stepsPerUnit)
+        accelSteps = round(accelDist * spu)
 
         realSteps = 0
         dt = accelTime / NB_ACCEL_PTS
+        speedRange = toSpeed - fromSpeed
         for i in range(NB_ACCEL_PTS):
-            y = self._accelTable[i]
-            speed = toSpeed * y + fromSpeed * (1 - y)
-            pulses = round(speed * self._stepsPerUnit * dt)
+            y = accelTable[i]
+            speed_spu = (fromSpeed + speedRange * y) * spu
+            pulses = round(speed_spu * dt)
             if pulses:
-                points.append((speed * self._stepsPerUnit, pulses))
+                points_append((speed_spu, pulses))
             realSteps += pulses
 
         if realSteps < accelSteps:
-            points.append((toSpeed * self._stepsPerUnit, accelSteps - realSteps))
+            points_append((toSpeed * spu, accelSteps - realSteps))
         elif realSteps > accelSteps:
             # Trim excess steps caused by floating-point rounding
             excess = realSteps - accelSteps
