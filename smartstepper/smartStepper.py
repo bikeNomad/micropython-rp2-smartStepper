@@ -202,16 +202,16 @@ class SmartStepper:
 
         points = []
 
-        # Accel phase: fromSpeed → peakSpeed
-        if fromSpeed < peakSpeed - 1e-6:
+        # Speed adjustment phase: accel or decel from fromSpeed to peakSpeed
+        if abs(fromSpeed - peakSpeed) > 1e-6:
             points.extend(self._accelPoints(fromSpeed, peakSpeed, accel=accel))
 
         # Const speed phase — omitted for triangular moves; present when forced_peak
         # is set (accel_time / MultiAxis) or when the move hits the speed ceiling.
         if not triangular and (forced_peak is not None or peakSpeed >= self._maxSpeed - 1e-6):
-            accelUpDist = (peakSpeed**2 - fromSpeed**2) / (2 * accel)
+            rampDist    = abs(peakSpeed**2 - fromSpeed**2) / (2 * accel)
             decelDist   = (peakSpeed**2 - self._minSpeed**2) / (2 * accel)
-            constDist   = abs(remaining) - accelUpDist - decelDist
+            constDist   = abs(remaining) - rampDist - decelDist
             constSteps  = round(constDist * self._stepsPerUnit)
             if constSteps > 0:
                 points.append((peakSpeed * self._stepsPerUnit, constSteps))
