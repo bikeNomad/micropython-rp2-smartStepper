@@ -22,6 +22,7 @@ BUGS:
 import time
 import math
 import machine
+import micropython
 
 from . import pulseGenerator
 from . import pulseCounter
@@ -153,6 +154,7 @@ class SmartStepper:
 
         return points
 
+    @micropython.native
     def _buildProfile(self, fromSpeed, remaining, triangular=False, forced_peak=None):
         """ Build a complete motion profile from fromSpeed over remaining distance.
 
@@ -595,7 +597,7 @@ class SmartStepper:
             self._pulseGenerator.update(points)
         else:
             self._pulseGenerator.stop()  # already at or past target: hard stop
-
+        
     @property
     def timedOut(self):
         """ True if the current move has exceeded its timeout.
