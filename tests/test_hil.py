@@ -46,6 +46,9 @@ PICO_TEST_FILES = [
     str(_TESTS_DIR / 'hil_accel_time.py'),
     str(_TESTS_DIR / 'hil_multiaxis.py'),
     str(_TESTS_DIR / 'hil_arc.py'),
+    str(_TESTS_DIR / 'hil_pc_speed_change.py'),
+    str(_TESTS_DIR / 'hil_pc_stop_start.py'),
+    str(_TESTS_DIR / 'hil_pc_direction_change.py'),
 ]
 
 
@@ -97,6 +100,34 @@ def parse_rising_edges(digital_csv: Path, channel: int, min_time: float = 0.0) -
                 edges.append(t)
             prev = val
     return edges
+
+
+def parse_net_position(
+    digital_csv: Path,
+    step_channel: int,
+    dir_channel: int,
+    min_time: float = 0.0,
+) -> int:
+    """Return signed net position from direction-aware step edge counting.
+
+    Each rising edge on step_channel counts as +1 (DIR=HIGH) or -1 (DIR=LOW).
+    The raw CSV contains all channel values at every transition, so cur_dir
+    is always current at the moment of each step rising edge.
+    """
+    step_col = f'Channel {step_channel}'
+    dir_col = f'Channel {dir_channel}'
+    net = 0
+    prev_step = None
+    cur_dir = 1
+    with open(digital_csv, newline='') as f:
+        for row in csv.DictReader(f):
+            t = float(row['Time [s]'])
+            cur_dir = int(row[dir_col])
+            step_val = int(row[step_col])
+            if t >= min_time and prev_step == 0 and step_val == 1:
+                net += 1 if cur_dir == 1 else -1
+            prev_step = step_val
+    return net
 
 
 def run_capture(manager: saleae.Manager, script: str, channels: list):
@@ -554,6 +585,158 @@ def test_arc_quarter_circle(manager: saleae.Manager):
           f'{len(edges1)}/{len(edges2)} steps, {gaps1}/{gaps2} seg-gaps)')
 
 
+def test_pulse_counter_speed_change_accuracy(manager: saleae.Manager):
+    """PulseCounter must stay accurate through repeated mid-move speed replans.
+
+    moveTo(100) at maxSpeed=50 (9600 steps).  Three maxSpeed changes are
+    issued during cruise: 50→15→40→50.  Each change triggers _replan() and
+    replaces the active DMA sequence.  Because replans alter velocity but not
+    target position, the PulseCounter must still reach exactly 9600 at the
+    end, and must agree with the Saleae signed edge count.
+    """
+    channels = [hil_config.STEP_CHANNEL, hil_config.DIR_CHANNEL]
+    tmpdir, stdout = run_capture(manager, 'hil_pc_speed_change.py', channels)
+
+    saleae_net = parse_net_position(
+        tmpdir / 'digital.csv',
+        hil_config.STEP_CHANNEL,
+        hil_config.DIR_CHANNEL,
+    )
+
+    pico_steps = None
+    for line in stdout.splitlines():
+        if line.startswith('done steps='):
+            pico_steps = int(line.split('=')[1])
+            break
+    assert pico_steps is not None, \
+        f'Pico did not print "done steps=..."\nstdout: {stdout}'
+
+    assert saleae_net == pico_steps, (
+        f'Saleae net ({saleae_net}) != PulseCounter ({pico_steps}) '
+        f'after speed replans'
+    )
+    assert abs(saleae_net - 9600) <= 1, \
+        f'Expected ~9600 steps after 3 replans, got {saleae_net}'
+
+    print(
+        f'  PASS  test_pulse_counter_speed_change_accuracy  '
+        f'({saleae_net} steps, matches PulseCounter)'
+    )
+
+
+def test_pulse_counter_stop_start_accuracy(manager: saleae.Manager):
+    """PulseCounter must stay accurate across stop/restart cycles.
+
+    Phase 1: moveTo(50), stop() mid-cruise.
+    Phase 2: moveTo(100), wait — forward to 100 units (~9600 steps).
+    Phase 3: moveTo(0) — return to origin.
+
+    Final net displacement is zero; the Saleae signed count and the
+    PulseCounter must both read ~0.  Intermediate PulseCounter values are
+    sanity-checked for ordering consistency.
+    """
+    channels = [hil_config.STEP_CHANNEL, hil_config.DIR_CHANNEL]
+    tmpdir, stdout = run_capture(manager, 'hil_pc_stop_start.py', channels)
+
+    saleae_net = parse_net_position(
+        tmpdir / 'digital.csv',
+        hil_config.STEP_CHANNEL,
+        hil_config.DIR_CHANNEL,
+    )
+
+    stop1 = stop2 = done = None
+    for line in stdout.splitlines():
+        if line.startswith('stop1 steps='):
+            stop1 = int(line.split('=')[1])
+        elif line.startswith('stop2 steps='):
+            stop2 = int(line.split('=')[1])
+        elif line.startswith('done steps='):
+            done = int(line.split('=')[1])
+    assert stop1 is not None, \
+        f'Pico did not print "stop1 steps=..."\nstdout: {stdout}'
+    assert stop2 is not None, \
+        f'Pico did not print "stop2 steps=..."\nstdout: {stdout}'
+    assert done is not None, \
+        f'Pico did not print "done steps=..."\nstdout: {stdout}'
+
+    # Ordering sanity: stop1 < stop2 (continued forward); done near 0 (returned).
+    assert 0 < stop1 < 4800, \
+        f'Phase-1 stop {stop1} not in expected range (0, 4800)'
+    assert stop1 < stop2, \
+        f'stop2 ({stop2}) should exceed stop1 ({stop1})'
+    assert abs(stop2 - 9600) <= 1, \
+        f'After phase 2, expected ~9600 steps, got {stop2}'
+
+    # Ground-truth check: Saleae net position must match final PulseCounter.
+    assert saleae_net == done, (
+        f'Saleae net ({saleae_net}) != final PulseCounter ({done}) '
+        f'after stop/restart cycles'
+    )
+    assert abs(done) <= 1, \
+        f'Motor did not return to origin after stop/restart; got {done}'
+
+    print(
+        f'  PASS  test_pulse_counter_stop_start_accuracy  '
+        f'(stop1={stop1}, stop2={stop2}, final={done})'
+    )
+
+
+def test_pulse_counter_direction_change_accuracy(manager: saleae.Manager):
+    """PulseCounter must track signed position correctly through direction changes.
+
+    Move 1 (forward):  moveTo(30)  → +2880 steps.
+    Move 2 (reverse):  moveTo(0)   → back to origin.
+    Move 3 (forward):  moveTo(50)  → +4800 steps.
+
+    The Saleae direction-aware net count and the PulseCounter must agree at
+    the reported waypoints, and must both read ~4800 at the end.
+    """
+    channels = [hil_config.STEP_CHANNEL, hil_config.DIR_CHANNEL]
+    tmpdir, stdout = run_capture(
+        manager, 'hil_pc_direction_change.py', channels
+    )
+
+    saleae_net = parse_net_position(
+        tmpdir / 'digital.csv',
+        hil_config.STEP_CHANNEL,
+        hil_config.DIR_CHANNEL,
+    )
+
+    fwd = rev = done = None
+    for line in stdout.splitlines():
+        if line.startswith('fwd steps='):
+            fwd = int(line.split('=')[1])
+        elif line.startswith('rev steps='):
+            rev = int(line.split('=')[1])
+        elif line.startswith('done steps='):
+            done = int(line.split('=')[1])
+    assert fwd is not None, \
+        f'Pico did not print "fwd steps=..."\nstdout: {stdout}'
+    assert rev is not None, \
+        f'Pico did not print "rev steps=..."\nstdout: {stdout}'
+    assert done is not None, \
+        f'Pico did not print "done steps=..."\nstdout: {stdout}'
+
+    # Waypoint sanity checks.
+    assert abs(fwd - 2880) <= 1, \
+        f'After moveTo(30), expected ~2880 steps, got {fwd}'
+    assert abs(rev) <= 1, \
+        f'After moveTo(0), expected ~0 steps, got {rev}'
+
+    # Ground-truth check: Saleae net must match final PulseCounter.
+    assert saleae_net == done, (
+        f'Saleae net ({saleae_net}) != PulseCounter ({done}) '
+        f'after direction changes'
+    )
+    assert abs(done - 4800) <= 1, \
+        f'Expected ~4800 steps after fwd/rev/fwd sequence, got {done}'
+
+    print(
+        f'  PASS  test_pulse_counter_direction_change_accuracy  '
+        f'(fwd={fwd}, rev={rev}, final={done}, saleae_net={saleae_net})'
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -568,6 +751,9 @@ TESTS = [
     test_stop_restart,
     test_multiaxis_sync,
     test_arc_quarter_circle,
+    test_pulse_counter_speed_change_accuracy,
+    test_pulse_counter_stop_start_accuracy,
+    test_pulse_counter_direction_change_accuracy,
 ]
 
 
