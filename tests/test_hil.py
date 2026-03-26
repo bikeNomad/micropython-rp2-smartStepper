@@ -166,6 +166,46 @@ def run_capture(manager: saleae.Manager, script: str, channels: list):
     return tmpdir, stdout
 
 
+def _parse_hil_stdout(stdout):
+    """Parse HIL script stdout into a flat dict of typed values.
+
+    Lines of the form '<header> key=val [key=val ...]' produce entries
+    '<header>.<key>' mapped to an int or float.  Lines of the form
+    'key=val' (first token contains '=') produce 'key' mapped to the raw
+    value string (used for complex values like 'phases=...').  Other lines
+    (e.g. 'Total time: 1.234') are ignored.
+
+    Examples::
+
+        'done steps=4800'                     → {'done.steps': 4800}
+        'stopped steps=100'                   → {'stopped.steps': 100}
+        'done x_steps=3840 y_steps=2880'      → {'done.x_steps': 3840,
+                                                  'done.y_steps': 2880}
+        'done x_pos=10.00 y_pos=10.00 ...'   → {'done.x_pos': 10.0, ...}
+        'phases=400,4800;...'                 → {'phases': '400,4800;...'}
+    """
+    result = {}
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        tokens = line.split()
+        first = tokens[0]
+        if '=' in first:
+            k, _, v = first.partition('=')
+            result[k] = v
+        else:
+            for token in tokens[1:]:
+                if '=' not in token:
+                    continue
+                k, _, v = token.partition('=')
+                try:
+                    result[f'{first}.{k}'] = float(v) if '.' in v else int(v)
+                except ValueError:
+                    result[f'{first}.{k}'] = v
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -207,12 +247,8 @@ def test_moveto_pulse_count(manager: saleae.Manager):
     saleae_count = len(parse_rising_edges(tmpdir / 'digital.csv', hil_config.STEP_CHANNEL))
 
     # Cross-check with PulseCounter value printed by the Pico script
-    pico_count = None
-    for line in stdout.splitlines():
-        if line.startswith('done steps='):
-            pico_count = int(line.split('=')[1])
-            break
-
+    values = _parse_hil_stdout(stdout)
+    pico_count = values.get('done.steps')
     assert pico_count is not None, f'Pico script did not print "done steps=..."\nstdout: {stdout}'
     assert saleae_count == pico_count, \
         f'Saleae ({saleae_count}) and PulseCounter ({pico_count}) disagree'
@@ -229,10 +265,16 @@ def test_accel_profile(manager: saleae.Manager):
     and strictly decreasing at end of the move.
     """
     channels = [hil_config.STEP_CHANNEL]
-    tmpdir, _ = run_capture(manager, 'hil_moveto.py', channels)
+    tmpdir, stdout = run_capture(manager, 'hil_moveto.py', channels)
 
     edges = parse_rising_edges(tmpdir / 'digital.csv', hil_config.STEP_CHANNEL)
     assert len(edges) > 50, f'Too few pulses to check profile ({len(edges)})'
+
+    values = _parse_hil_stdout(stdout)
+    pico_count = values.get('done.steps')
+    assert pico_count is not None, f'Pico did not print "done steps=..."\nstdout: {stdout}'
+    assert abs(len(edges) - pico_count) <= 1, \
+        f'Saleae ({len(edges)}) and PulseCounter ({pico_count}) disagree'
 
     # Instantaneous frequency between successive pulses
     freqs = [1.0 / (edges[i + 1] - edges[i]) for i in range(len(edges) - 1)]
@@ -276,13 +318,9 @@ def test_stop_restart(manager: saleae.Manager):
     assert len(step_edges) > 50, f'Too few pulses to verify stop+restart ({len(step_edges)})'
 
     # Extract counts from Pico stdout
-    stopped_steps = final_steps = None
-    for line in stdout.splitlines():
-        if line.startswith('stopped steps='):
-            stopped_steps = int(line.split('=')[1])
-        elif line.startswith('done steps='):
-            final_steps = int(line.split('=')[1])
-
+    values = _parse_hil_stdout(stdout)
+    stopped_steps = values.get('stopped.steps')
+    final_steps   = values.get('done.steps')
     assert stopped_steps is not None, f'Pico did not print "stopped steps=..."\\nstdout: {stdout}'
     assert final_steps   is not None, f'Pico did not print "done steps=..."\\nstdout: {stdout}'
 
@@ -315,11 +353,22 @@ def test_triangular_profile(manager: saleae.Manager):
     near the midpoint of the move, then fall monotonically — with no plateau.
     """
     channels = [hil_config.STEP_CHANNEL]
-    tmpdir, _ = run_capture(manager, 'hil_triangular.py', channels)
+    tmpdir, stdout = run_capture(manager, 'hil_triangular.py', channels)
 
     edges = parse_rising_edges(tmpdir / 'digital.csv', hil_config.STEP_CHANNEL)
-    assert abs(len(edges) - 480) <= 2, f'Expected ~480 pulses, got {len(edges)}'
     assert len(edges) > 20, f'Too few pulses to analyze profile ({len(edges)})'
+
+    # PulseCounter is authoritative; check it before the Saleae absolute-count
+    # assertion so both values appear in any failure message.
+    values = _parse_hil_stdout(stdout)
+    pico_count = values.get('done.steps')
+    assert pico_count is not None, f'Pico did not print "done steps=..."\nstdout: {stdout}'
+    # _accelPoints self-corrects to the rounded accelSteps, so the firmware
+    # count should be exactly 480 (5 units * 96 steps/unit).
+    assert abs(pico_count - 480) <= 2, \
+        f'Expected ~480 pulses (5 units * 96 steps/unit), PulseCounter={pico_count}'
+    assert abs(len(edges) - pico_count) <= 1, \
+        f'Saleae ({len(edges)}) and PulseCounter ({pico_count}) disagree'
 
     freqs = [1.0 / (edges[i + 1] - edges[i]) for i in range(len(edges) - 1)]
     peak_hz = max(freqs)
@@ -361,11 +410,17 @@ def test_accel_time_profile(manager: saleae.Manager):
     Expected ~4800 pulses. Cruise section must be near 3360 Hz, not 4800 Hz.
     """
     channels = [hil_config.STEP_CHANNEL]
-    tmpdir, _ = run_capture(manager, 'hil_accel_time.py', channels)
+    tmpdir, stdout = run_capture(manager, 'hil_accel_time.py', channels)
 
     edges = parse_rising_edges(tmpdir / 'digital.csv', hil_config.STEP_CHANNEL)
     assert abs(len(edges) - 4800) <= 2, f'Expected ~4800 pulses, got {len(edges)}'
     assert len(edges) > 50, f'Too few pulses to analyze profile ({len(edges)})'
+
+    values = _parse_hil_stdout(stdout)
+    pico_count = values.get('done.steps')
+    assert pico_count is not None, f'Pico did not print "done steps=..."\nstdout: {stdout}'
+    assert abs(len(edges) - pico_count) <= 1, \
+        f'Saleae ({len(edges)}) and PulseCounter ({pico_count}) disagree'
 
     freqs = [1.0 / (edges[i + 1] - edges[i]) for i in range(len(edges) - 1)]
     peak_hz = max(freqs)
@@ -399,10 +454,18 @@ def test_replan_profile(manager: saleae.Manager):
       - The last 20% of steps cruise near 2400 Hz (slow phase after replan).
     """
     channels = [hil_config.STEP_CHANNEL]
-    tmpdir, _ = run_capture(manager, 'hil_replan.py', channels)
+    tmpdir, stdout = run_capture(manager, 'hil_replan.py', channels)
 
     edges = parse_rising_edges(tmpdir / 'digital.csv', hil_config.STEP_CHANNEL)
     assert len(edges) > 200, f'Too few pulses to check replan ({len(edges)})'
+
+    values = _parse_hil_stdout(stdout)
+    pico_count = values.get('done.steps')
+    assert pico_count is not None, f'Pico did not print "done steps=..."\nstdout: {stdout}'
+    assert len(edges) == pico_count, \
+        f'Saleae ({len(edges)}) and PulseCounter ({pico_count}) disagree'
+    assert abs(pico_count - 9600) <= 1, \
+        f'Expected ~9600 pulses (100 units * 96 steps/unit), got {pico_count}'
 
     freqs = [1.0 / (edges[i + 1] - edges[i]) for i in range(len(edges) - 1)]
     n = len(freqs) // 5  # 20 % window
@@ -418,7 +481,7 @@ def test_replan_profile(manager: saleae.Manager):
         f'Slow phase peak {peak_slow:.0f} Hz, expected <3000 after replan to maxSpeed=25'
 
     print(f'  PASS  test_replan_profile  '
-          f'(fast peak {peak_fast:.0f} Hz → slow peak {peak_slow:.0f} Hz)')
+          f'({pico_count} steps, fast peak {peak_fast:.0f} Hz → slow peak {peak_slow:.0f} Hz)')
 
 
 def test_multiaxis_sync(manager: saleae.Manager):
@@ -474,15 +537,9 @@ def test_multiaxis_sync(manager: saleae.Manager):
          f'axes not finishing together?')
 
     # 4. PulseCounter cross-check from Pico stdout.
-    # stdout line: "done x_steps=3840 y_steps=2879"
-    # parts:        ['done', 'x_steps=3840', 'y_steps=2879']
-    pico_x = pico_y = None
-    for line in stdout.splitlines():
-        if line.startswith('done x_steps='):
-            parts = line.split()
-            pico_x = int(parts[1].split('=')[1])
-            pico_y = int(parts[2].split('=')[1])
-            break
+    values = _parse_hil_stdout(stdout)
+    pico_x = values.get('done.x_steps')
+    pico_y = values.get('done.y_steps')
     assert pico_x is not None, f'Pico did not print "done x_steps=..."\\nstdout: {stdout}'
     assert len(edges1) == pico_x, \
         f'Axis 1: Saleae ({len(edges1)}) ≠ PulseCounter ({pico_x})'
@@ -559,17 +616,11 @@ def test_arc_quarter_circle(manager: saleae.Manager):
     assert max_gap2 < 3.0, f'Axis Y: stall detected (max gap {max_gap2:.2f} s)'
 
     # 6 & 7. Cross-check Pico stdout.
-    # line: "done x_pos=100.00 y_pos=100.00 x_steps=10000 y_steps=10000"
-    pico_x_steps = pico_y_steps = None
-    pico_x_pos = pico_y_pos = None
-    for line in stdout.splitlines():
-        if line.startswith('done x_pos='):
-            parts = line.split()
-            pico_x_pos   = float(parts[1].split('=')[1])
-            pico_y_pos   = float(parts[2].split('=')[1])
-            pico_x_steps = int(parts[3].split('=')[1])
-            pico_y_steps = int(parts[4].split('=')[1])
-            break
+    values = _parse_hil_stdout(stdout)
+    pico_x_pos   = values.get('done.x_pos')
+    pico_y_pos   = values.get('done.y_pos')
+    pico_x_steps = values.get('done.x_steps')
+    pico_y_steps = values.get('done.y_steps')
     assert pico_x_steps is not None, \
         f'Pico did not print "done x_pos=..."\nstdout: {stdout}'
     assert abs(pico_x_pos - 100.0) < 0.5, \
@@ -592,12 +643,8 @@ def test_pulse_counter_speed_change_accuracy(manager: saleae.Manager):
     moveTo(100) at maxSpeed=50 (9600 steps).  Three maxSpeed changes are
     issued during cruise: 50->15->40->50.  Each change triggers _replan() and
     replaces the active DMA sequence.  Because replans alter velocity but not
-    target position, the PulseCounter must still reach close to 9600 at the
-    end, and must agree with the Saleae signed edge count.
-
-    Expected step count is computed from actual timestamps reported by the
-    Pico (to account for time.sleep_ms() inaccuracy) rather than assuming
-    a fixed 9600.
+    target position, the PulseCounter must reach exactly 9600 at the end
+    and must agree with the Saleae signed edge count.
     """
     channels = [hil_config.STEP_CHANNEL, hil_config.DIR_CHANNEL]
     tmpdir, stdout = run_capture(manager, 'hil_pc_speed_change.py', channels)
@@ -608,45 +655,25 @@ def test_pulse_counter_speed_change_accuracy(manager: saleae.Manager):
         hil_config.DIR_CHANNEL,
     )
 
-    pico_steps = None
-    phase_data = None
-    for line in stdout.splitlines():
-        if line.startswith('done steps='):
-            pico_steps = int(line.split('=')[1])
-        elif line.startswith('phases='):
-            phase_data = line.split('=', 1)[1]
+    values = _parse_hil_stdout(stdout)
+    pico_steps = values.get('done.steps')
+    phase_data = values.get('phases')
     assert pico_steps is not None, \
         f'Pico did not print "done steps=..."\nstdout: {stdout}'
     assert phase_data is not None, \
         f'Pico did not print "phases=..."\nstdout: {stdout}'
 
-    # Compute expected steps from actual phase durations and cruise speeds.
-    # Each phase entry is "elapsed_ms,speed_steps_per_sec".
-    expected_steps = 0.0
-    for entry in phase_data.split(';'):
-        ms_str, sps_str = entry.split(',')
-        elapsed_s = int(ms_str) / 1000.0
-        speed_sps = int(sps_str)
-        expected_steps += elapsed_s * speed_sps
-
-    # Allow 5% tolerance to account for accel/decel ramps between phases
-    # (the cruise speed is an upper bound; ramps reduce actual steps).
-    tolerance = expected_steps * 0.05
-
     assert saleae_net == pico_steps, (
         f'Saleae net ({saleae_net}) != PulseCounter ({pico_steps}) '
         f'after speed replans'
     )
-    assert abs(saleae_net - expected_steps) <= tolerance, (
-        f'Expected ~{expected_steps:.0f} steps (from timestamps), '
-        f'got {saleae_net} (delta {abs(saleae_net - expected_steps):.0f}, '
-        f'tolerance {tolerance:.0f})'
-    )
+    # Replans change velocity only, not target; move always completes to 9600 steps.
+    assert abs(pico_steps - 9600) <= 1, \
+        f'Expected ~9600 steps (100 units * 96 steps/unit), got {pico_steps}'
 
     print(
         f'  PASS  test_pulse_counter_speed_change_accuracy  '
-        f'({saleae_net} steps, expected ~{expected_steps:.0f} '
-        f'from timestamps, matches PulseCounter)'
+        f'({pico_steps} steps matches PulseCounter and target)'
     )
 
 
@@ -670,14 +697,10 @@ def test_pulse_counter_stop_start_accuracy(manager: saleae.Manager):
         hil_config.DIR_CHANNEL,
     )
 
-    stop1 = stop2 = done = None
-    for line in stdout.splitlines():
-        if line.startswith('stop1 steps='):
-            stop1 = int(line.split('=')[1])
-        elif line.startswith('stop2 steps='):
-            stop2 = int(line.split('=')[1])
-        elif line.startswith('done steps='):
-            done = int(line.split('=')[1])
+    values = _parse_hil_stdout(stdout)
+    stop1 = values.get('stop1.steps')
+    stop2 = values.get('stop2.steps')
+    done  = values.get('done.steps')
     assert stop1 is not None, \
         f'Pico did not print "stop1 steps=..."\nstdout: {stdout}'
     assert stop2 is not None, \
@@ -728,14 +751,10 @@ def test_pulse_counter_direction_change_accuracy(manager: saleae.Manager):
         hil_config.DIR_CHANNEL,
     )
 
-    fwd = rev = done = None
-    for line in stdout.splitlines():
-        if line.startswith('fwd steps='):
-            fwd = int(line.split('=')[1])
-        elif line.startswith('rev steps='):
-            rev = int(line.split('=')[1])
-        elif line.startswith('done steps='):
-            done = int(line.split('=')[1])
+    values = _parse_hil_stdout(stdout)
+    fwd  = values.get('fwd.steps')
+    rev  = values.get('rev.steps')
+    done = values.get('done.steps')
     assert fwd is not None, \
         f'Pico did not print "fwd steps=..."\nstdout: {stdout}'
     assert rev is not None, \
